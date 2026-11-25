@@ -1,0 +1,20 @@
+[package]
+name = "photo-splitter"
+description = "Splits a directory of time-ordered photos into per-shoot folders using QR-code marker frames, writing configurable YAML metadata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../README.md"
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "photo-splitter"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"

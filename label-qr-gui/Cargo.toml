@@ -1,0 +1,26 @@
+[package]
+name = "label-qr-gui"
+description = "Fullscreen appliance GUI for entering field-label metadata and displaying it as a large high-contrast QR code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../README.md"
+keywords = ["qr-code", "egui", "labeling"]
+categories = ["gui"]
+
+[[bin]]
+name = "label-qr-gui"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.36"
+qrcode = { version = "0.14", default-features = false }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"

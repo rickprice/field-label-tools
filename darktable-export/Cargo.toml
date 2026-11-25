@@ -1,0 +1,20 @@
+[package]
+name = "darktable-export"
+description = "Converts split-and-tagged photo shoot directories into XMP sidecars for import into Darktable"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../README.md"
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "darktable-export"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+log = "0.4"
+env_logger = "0.11"

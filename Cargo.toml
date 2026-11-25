@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["label-qr-gui", "photo-splitter", "darktable-export"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/rickprice/field-label-tools"
+authors = ["Frederick Price <fprice@pricemail.ca>"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
