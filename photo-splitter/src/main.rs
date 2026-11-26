@@ -515,9 +515,30 @@ mod tests {
         PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures")).join(name)
     }
 
+    /// `Cargo.toml`'s `exclude` leaves these two real-camera fixtures out of
+    /// the crates.io package (see its comment -- a `cargo publish`'d photo-
+    /// splitter shouldn't carry real camera photos or ~34MB of RAW data).
+    /// `cargo test` against a repo checkout still has them and should run
+    /// these tests for real; `cargoCheckHook` building from the published,
+    /// fixture-less package should skip them rather than fail on a file
+    /// that was deliberately never shipped.
+    macro_rules! skip_if_fixture_missing {
+        ($path:expr) => {
+            if !$path.is_file() {
+                eprintln!(
+                    "skipping: fixture {} not present (expected outside a repo checkout, e.g. \
+                     building the published crate, which excludes tests/fixtures/)",
+                    $path.display()
+                );
+                return;
+            }
+        };
+    }
+
     #[test]
     fn decode_qr_on_real_near_black_raw_finds_no_marker_quickly() {
         let path = fixture_path("near-black-no-marker.CR2");
+        skip_if_fixture_missing!(path);
         let start = std::time::Instant::now();
         let result = decode_qr(&path, false);
         let elapsed = start.elapsed();
@@ -533,6 +554,7 @@ mod tests {
     #[test]
     fn decode_qr_reads_a_real_camera_captured_marker() {
         let path = fixture_path("real-camera-marker.jpg");
+        skip_if_fixture_missing!(path);
         let label = decode_qr(&path, false).expect("real camera marker must decode");
 
         assert_eq!(label.project, "Test QR Code generation");
