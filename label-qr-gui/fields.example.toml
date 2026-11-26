@@ -1,0 +1,19 @@
+# Example extra-fields config for label-qr-gui.
+#
+# Run with: label-qr-gui --config fields.example.toml
+#
+# Each [[field]] adds one more text field below the built-in
+# Project/Location/ID/Name fields, embedded in the QR code's JSON payload
+# under "extra". By default a field's value is kept across "Next" (like
+# Project/Location); set reset_on_next = true to clear it instead (like
+# Name).
+
+[[field]]
+name = "Surveyor"
+
+[[field]]
+name = "Permit Number"
+
+[[field]]
+name = "Notes"
+reset_on_next = true

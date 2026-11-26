@@ -1,21 +1,45 @@
+use std::path::{Path, PathBuf};
+
+use anyhow::Context;
 use clap::Parser;
 use eframe::egui;
 use qrcode::{Color as QrColor, EcLevel, QrCode};
-use serde::Serialize;
+use serde::Deserialize;
+use serde_json::{Map, Value, json};
 
 #[derive(Parser)]
 #[command(
     version,
     about = "Fullscreen appliance: enter field-label metadata on the left, read it back as a large QR code on the right"
 )]
-struct Args {}
+struct Args {
+    /// TOML file defining extra project-specific metadata fields to collect,
+    /// in addition to the built-in Project/Location/ID/Name fields
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+}
 
-#[derive(Serialize)]
-struct Label<'a> {
-    project: &'a str,
-    location: &'a str,
-    id: u64,
-    name: &'a str,
+#[derive(Deserialize, Default)]
+struct FieldsConfig {
+    #[serde(default)]
+    field: Vec<ExtraFieldDef>,
+}
+
+#[derive(Deserialize, Clone)]
+struct ExtraFieldDef {
+    name: String,
+    /// Clear this field's value on "Next" (like Name), instead of keeping it
+    /// (like Project/Location). Defaults to keeping it.
+    #[serde(default)]
+    reset_on_next: bool,
+}
+
+fn load_fields_config(path: &Path) -> anyhow::Result<Vec<ExtraFieldDef>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading fields config {}", path.display()))?;
+    let config: FieldsConfig = toml::from_str(&text)
+        .with_context(|| format!("parsing fields config {}", path.display()))?;
+    Ok(config.field)
 }
 
 struct LabelApp {
@@ -23,28 +47,41 @@ struct LabelApp {
     location: String,
     id: u64,
     name: String,
+    extra: Vec<(ExtraFieldDef, String)>,
 }
 
-impl Default for LabelApp {
-    fn default() -> Self {
+impl LabelApp {
+    fn new(extra_fields: Vec<ExtraFieldDef>) -> Self {
         Self {
             project: String::new(),
             location: String::new(),
             id: 1,
             name: String::new(),
+            extra: extra_fields
+                .into_iter()
+                .map(|field| (field, String::new()))
+                .collect(),
         }
     }
-}
 
-impl LabelApp {
     fn payload(&self) -> String {
-        let label = Label {
-            project: &self.project,
-            location: &self.location,
-            id: self.id,
-            name: &self.name,
-        };
-        serde_json::to_string(&label).unwrap_or_default()
+        let mut obj = Map::new();
+        obj.insert("project".into(), json!(self.project));
+        obj.insert("location".into(), json!(self.location));
+        obj.insert("id".into(), json!(self.id));
+        obj.insert("name".into(), json!(self.name));
+
+        let mut extra_obj = Map::new();
+        for (field, value) in &self.extra {
+            if !value.is_empty() {
+                extra_obj.insert(field.name.clone(), json!(value));
+            }
+        }
+        if !extra_obj.is_empty() {
+            obj.insert("extra".into(), Value::Object(extra_obj));
+        }
+
+        serde_json::to_string(&Value::Object(obj)).unwrap_or_default()
     }
 
     fn folder_name(&self) -> String {
@@ -79,8 +116,15 @@ impl eframe::App for LabelApp {
 
                 ui.label("Name");
                 let name_resp = ui.text_edit_singleline(&mut self.name);
-                ui.add_space(20.0);
+                ui.add_space(8.0);
 
+                for (field, value) in &mut self.extra {
+                    ui.label(&field.name);
+                    ui.text_edit_singleline(value);
+                    ui.add_space(8.0);
+                }
+
+                ui.add_space(12.0);
                 ui.separator();
                 ui.add_space(12.0);
                 ui.monospace(self.folder_name());
@@ -95,6 +139,11 @@ impl eframe::App for LabelApp {
                 if next_clicked || enter_pressed {
                     self.id += 1;
                     self.name.clear();
+                    for (field, value) in &mut self.extra {
+                        if field.reset_on_next {
+                            value.clear();
+                        }
+                    }
                     name_resp.request_focus();
                 }
             });
@@ -146,7 +195,18 @@ fn draw_qr(ui: &mut egui::Ui, payload: &str) {
 
 fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    let _args = Args::parse();
+    let args = Args::parse();
+
+    let extra_fields = match &args.config {
+        Some(path) => match load_fields_config(path) {
+            Ok(fields) => fields,
+            Err(err) => {
+                log::error!("{err:#}");
+                std::process::exit(1);
+            }
+        },
+        None => Vec::new(),
+    };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -158,6 +218,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Field Label",
         options,
-        Box::new(|_cc| Ok(Box::new(LabelApp::default()))),
+        Box::new(move |_cc| Ok(Box::new(LabelApp::new(extra_fields)))),
     )
 }

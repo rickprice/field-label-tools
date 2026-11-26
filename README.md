@@ -11,7 +11,11 @@ afterward.
    high-contrast QR code on the right. Fill in Project / Location / ID /
    Name, photograph the screen as the first frame of a shoot, then press
    **Next** (or hit Enter in the Name field) to bump the ID and clear the
-   Name for the next shoot while keeping Project/Location. ✅ implemented.
+   Name for the next shoot while keeping Project/Location. Extra,
+   project-specific fields can be added with `--config fields.toml` (see
+   [`fields.example.toml`](label-qr-gui/fields.example.toml)); their
+   values are embedded in the QR's JSON payload alongside the built-in
+   fields, under `"extra"`. ✅ implemented.
 2. **`photo-splitter`** — a CLI that walks a directory of time-ordered
    photos, treats each QR-code frame as the start of a new group, and
    splits everything up to the next QR frame into
@@ -29,11 +33,29 @@ afterward.
 
 ## Configurable metadata
 
-The initial field set is Project / Location / ID / Name, but more
-fields may be needed later. `photo-splitter`'s metadata schema is meant
-to be configurable (e.g. via a config file listing additional fields)
-once it's clear what those fields are — see that crate's issues/TODOs
-once started.
+Project / Location / ID / Name are built in and always present.
+Additional fields are configured per project with a TOML file:
+
+```toml
+[[field]]
+name = "Surveyor"
+
+[[field]]
+name = "Notes"
+reset_on_next = true  # cleared on "Next", like Name; default is to persist, like Project/Location
+```
+
+Pass it to the GUI with `label-qr-gui --config fields.toml`. Each
+configured field's value ends up in the QR's JSON payload under
+`"extra"` (empty values are omitted), e.g.:
+
+```json
+{"project":"P1","location":"North Ridge","id":3,"name":"overview","extra":{"Surveyor":"J. Price"}}
+```
+
+`photo-splitter` will need to treat `"extra"` as an open map (field
+names it's never seen are still valid) rather than a fixed schema,
+since the set of extra fields varies per project/config file.
 
 ## Project layout
 
