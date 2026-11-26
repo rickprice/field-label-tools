@@ -9,6 +9,9 @@ use clap::Parser;
 use exif::{In, Tag, Value};
 use serde::{Deserialize, Serialize};
 
+mod libraw_sys;
+mod raw_decode;
+
 /// RAW extensions matching darktable-import-xmp's supported format list.
 const RAW_EXTENSIONS: &[&str] = &["cr2", "nef", "arw", "dng", "orf", "pef"];
 const RASTER_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "bmp", "webp"];
@@ -28,6 +31,14 @@ struct Args {
     /// Show what would be grouped without moving any files or writing metadata
     #[arg(long, short = 'n')]
     dry_run: bool,
+
+    /// Scan RAW files' embedded EXIF thumbnail for QR codes instead of
+    /// running LibRaw's full demosaic pipeline. Much faster, but the
+    /// thumbnail is often small and some cameras omit it entirely, so a
+    /// marker frame can be missed and silently merged into the previous
+    /// group. Prefer the default unless a full run is too slow.
+    #[arg(long)]
+    fast: bool,
 }
 
 /// The JSON payload label-qr-gui encodes into its QR code.
@@ -83,7 +94,7 @@ fn run(args: &Args) -> Result<()> {
     let mut groups_written = 0usize;
 
     for path in entries {
-        match decode_qr(&path) {
+        match decode_qr(&path, args.fast) {
             Some(label) => {
                 if let Some(group) = current.take() {
                     finish_group(group, &args.dir, args.dry_run)?;
@@ -164,8 +175,8 @@ fn read_exif(path: &Path) -> Option<exif::Exif> {
 
 // ── QR decoding ──────────────────────────────────────────────────────────────
 
-fn decode_qr(path: &Path) -> Option<LabelPayload> {
-    let gray = load_grayscale_for_qr(path)?;
+fn decode_qr(path: &Path, fast: bool) -> Option<LabelPayload> {
+    let gray = load_grayscale_for_qr(path, fast)?;
     let mut prepared = rqrr::PreparedImage::prepare(gray);
     for grid in prepared.detect_grids() {
         let Ok((_, content)) = grid.decode() else {
@@ -182,28 +193,25 @@ fn decode_qr(path: &Path) -> Option<LabelPayload> {
     None
 }
 
-/// RAW files aren't decoded directly (no cheap full-resolution path); the
-/// EXIF-embedded thumbnail is scanned instead. label-qr-gui renders its QR
-/// very large and high-contrast specifically so it should still be legible
-/// even at thumbnail resolution, but this is a known weak point: if a
-/// camera's thumbnail is too small or absent, its marker frame will be
-/// missed and merged into the previous group instead. If that happens in
-/// practice, a heavier RAW-preview crate may be needed here.
-fn load_grayscale_for_qr(path: &Path) -> Option<image::GrayImage> {
+fn load_grayscale_for_qr(path: &Path, fast: bool) -> Option<image::GrayImage> {
     if is_raw(path) {
-        let bytes = extract_raw_thumbnail(path);
-        match bytes {
-            Some(bytes) => image::load_from_memory(&bytes)
-                .ok()
-                .map(|img| img.to_luma8()),
-            None => {
-                log::warn!(
-                    "{}: RAW file has no embedded thumbnail to scan for a QR code",
-                    path.display()
-                );
-                None
-            }
+        let image = if fast {
+            raw_decode::decode_thumbnail(path)
+        } else {
+            raw_decode::decode_default(path)
+        };
+        if image.is_none() {
+            log::warn!(
+                "{}: could not get an image to scan for a QR code ({})",
+                path.display(),
+                if fast {
+                    "no usable EXIF thumbnail"
+                } else {
+                    "libraw decode failed"
+                }
+            );
         }
+        image
     } else {
         match image::open(path) {
             Ok(img) => Some(img.to_luma8()),
@@ -212,23 +220,6 @@ fn load_grayscale_for_qr(path: &Path) -> Option<image::GrayImage> {
                 None
             }
         }
-    }
-}
-
-fn extract_raw_thumbnail(path: &Path) -> Option<Vec<u8>> {
-    let exif = read_exif(path)?;
-    let offset = get_u32(&exif, Tag::JPEGInterchangeFormat, In::THUMBNAIL)? as usize;
-    let length = get_u32(&exif, Tag::JPEGInterchangeFormatLength, In::THUMBNAIL)? as usize;
-    let end = offset.checked_add(length)?;
-    exif.buf().get(offset..end).map(<[u8]>::to_vec)
-}
-
-fn get_u32(exif: &exif::Exif, tag: Tag, ifd: In) -> Option<u32> {
-    let field = exif.get_field(tag, ifd)?;
-    match &field.value {
-        Value::Long(v) => v.first().copied(),
-        Value::Short(v) => v.first().map(|&n| u32::from(n)),
-        _ => None,
     }
 }
 
@@ -367,7 +358,7 @@ mod tests {
         let path = dir.path().join("marker.jpg");
         fs::write(&path, make_qr_jpeg(&label)).unwrap();
 
-        assert_eq!(decode_qr(&path), Some(label));
+        assert_eq!(decode_qr(&path, false), Some(label));
     }
 
     #[test]
@@ -377,7 +368,7 @@ mod tests {
         let image = image::RgbImage::new(64, 64);
         image.save(&path).unwrap();
 
-        assert_eq!(decode_qr(&path), None);
+        assert_eq!(decode_qr(&path, false), None);
     }
 
     // ── grouping/moving ────────────────────────────────────────────────────
@@ -506,6 +497,7 @@ mod tests {
         run(&Args {
             dir: dir.path().to_path_buf(),
             dry_run: false,
+            fast: false,
         })
         .unwrap();
 

@@ -30,15 +30,21 @@ afterward.
 
    RAW files (CR2/NEF/ARW/DNG/ORF/PEF, matching `darktable-import-xmp`'s
    supported list) are the primary target; JPEG/PNG/TIFF/BMP/WebP are
-   also supported. For RAW files, the QR is scanned from the
-   EXIF-embedded thumbnail rather than the full RAW data (there's no
-   cheap way to decode that directly) — label-qr-gui's QR is
-   deliberately huge and high-contrast so it should survive being
-   shrunk to thumbnail size, but if your camera's thumbnail turns out
-   too small (or absent), that marker frame will be missed and merged
-   into the previous group. Run with `--dry-run` first and check the
-   log output (`RUST_LOG=debug` for more detail) before trusting it on
-   a real shoot, especially the first time with a new camera.
+   also supported. By default, RAW files are decoded with LibRaw's full
+   `dcraw_process` pipeline (demosaic, default white balance, LibRaw's
+   default gamma/brightness curve) before scanning for a QR code — the
+   same kind of default rendering most RAW viewers, including
+   Darktable itself, produce. This is slower than reading the
+   embedded EXIF thumbnail, but much more reliably bright/contrasty
+   enough to find the QR regardless of the as-shot exposure, and it's
+   a one-off batch job rather than something run interactively. Pass
+   `--fast` to scan the EXIF thumbnail instead (faster, but
+   thumbnails are often small — commonly ~160×120 — and some cameras
+   omit one entirely, so a marker frame scanned this way can be missed
+   and silently merged into the previous group). Run with `--dry-run`
+   first and check the log output (`RUST_LOG=debug` for more detail)
+   before trusting either mode on a real shoot, especially the first
+   time with a new camera.
 3. **`darktable-export`** — a CLI that converts those split, tagged
    directories into XMP sidecars. 🚧 planned. This is expected to feed
    into the existing
@@ -104,15 +110,22 @@ Binaries land in `target/release/`.
 ### NixOS
 
 ```sh
-nix build        # builds label-qr-gui
-nix run           # runs label-qr-gui
-nix develop        # dev shell with rustc/cargo/clippy/rustfmt and the
-                    # GUI's runtime libraries on LD_LIBRARY_PATH
+nix build .#label-qr-gui
+nix build .#photo-splitter
+nix run .#label-qr-gui
+nix develop        # dev shell with rustc/cargo/clippy/rustfmt, the
+                    # GUI's runtime libraries on LD_LIBRARY_PATH, and
+                    # libraw + bindgenHook for photo-splitter's build.rs
 ```
 
-`photo-splitter` and `darktable-export` aren't exposed as Nix packages
-yet since they're not implemented; `nix build` only builds
-`label-qr-gui` for now.
+`photo-splitter` links against the system `libraw_r` library via
+`bindgen` (see `photo-splitter/build.rs`); on NixOS this is handled by
+`pkgs.libraw` + `pkgs.rustPlatform.bindgenHook` in `flake.nix`. On other
+platforms, install LibRaw's dev package (e.g. `libraw-dev` on
+Debian/Ubuntu) and a libclang (e.g. `libclang-dev`) before building.
+
+`darktable-export` isn't exposed as a Nix package yet since it's not
+implemented.
 
 ## License
 

@@ -60,6 +60,27 @@
               mainProgram = "label-qr-gui";
             };
           };
+          photo-splitter = pkgs.rustPlatform.buildRustPackage {
+            pname = "photo-splitter";
+            version = "0.1.0";
+            src = self;
+            cargoLock.lockFile = ./Cargo.lock;
+            cargoBuildFlags = [
+              "-p"
+              "photo-splitter"
+            ];
+            nativeBuildInputs = [
+              pkgs.pkg-config
+              pkgs.rustPlatform.bindgenHook
+            ];
+            buildInputs = [ pkgs.libraw ];
+            meta = with pkgs.lib; {
+              description = "Splits a directory of time-ordered photos into per-shoot folders using QR-code marker frames";
+              homepage = "https://github.com/rickprice/field-label-tools";
+              license = licenses.mit;
+              mainProgram = "photo-splitter";
+            };
+          };
           default = self.packages.${system}.label-qr-gui;
         }
       );
@@ -78,8 +99,9 @@
               rustfmt
               rust-analyzer
               pkg-config
+              rustPlatform.bindgenHook
             ];
-            buildInputs = guiLibs pkgs;
+            buildInputs = guiLibs pkgs ++ [ pkgs.libraw ];
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (guiLibs pkgs);
           };
         }
