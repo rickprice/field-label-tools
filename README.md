@@ -127,17 +127,12 @@ afterward.
    tag_prefix = "PricePixel"
    default_client = "Acme Co"
    ```
-3. **`darktable-export`** — still a stub; its originally-planned job
-   (produce XMP sidecars) is now handled by `photo-splitter` directly
-   (see above). Whether a separate import step is still needed at all
-   depends on whether Darktable's plain import (reading those sidecars'
-   tags, with no special handling) is sufficient — if so, this crate
-   may turn out to be unnecessary. The one thing a bare import can't do
-   is grouping (Darktable's `group_id` is a `library.db`-only concept,
-   not something storable in a portable sidecar — see
-   [`darktable-import-xmp`](../darktable-import-xmp), which already
-   writes `group_id` directly, for how that would be done if it turns
-   out to matter). 🚧 undecided.
+
+   A separate import step for grouping isn't part of this repo — see
+   [`darktable-import-xmp`](../darktable-import-xmp), a sibling tool that
+   sets Darktable's `group_id` directly (not something storable in a
+   portable sidecar), for how that would be done if it turns out to
+   matter.
 
 ## Configurable metadata
 
@@ -176,7 +171,6 @@ of extra fields varies per project/config file, and writes it into
 ```
 label-qr-gui/      GUI appliance (egui/eframe) — crate implemented
 photo-splitter/    CLI — crate implemented
-darktable-export/  CLI — stub only, not yet implemented
 ```
 
 This is a Cargo workspace; shared package metadata (version, edition,
@@ -207,9 +201,6 @@ nix develop        # dev shell with rustc/cargo/clippy/rustfmt, the
 `pkgs.libraw` + `pkgs.rustPlatform.bindgenHook` in `flake.nix`. On other
 platforms, install LibRaw's dev package (e.g. `libraw-dev` on
 Debian/Ubuntu) and a libclang (e.g. `libclang-dev`) before building.
-
-`darktable-export` isn't exposed as a Nix package yet since it's not
-implemented.
 
 ## License
 

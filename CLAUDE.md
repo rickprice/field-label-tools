@@ -120,15 +120,16 @@ photo-splitter/     scans a directory of time-ordered photos (EXIF
                     published LibRaw Rust bindings were unsuitable --
                     checked 2026-11-26, worth re-checking if revisiting
                     this).
-darktable-export/   not yet implemented, and its originally-planned job
-                    (produce XMP sidecars) has been absorbed into
-                    photo-splitter itself (see above) -- this crate's
-                    remaining purpose, if any, is undecided. It still
-                    should not talk to Darktable's SQLite database
-                    directly if it ends up doing anything; that's
-                    `darktable-import-xmp`'s job (group_id especially --
-                    see "Grouping is library.db-only" below).
 ```
+
+There is no `darktable-export` crate -- a stub was scaffolded early on
+for what turned out to be XMP sidecar generation, but that job was
+absorbed into `photo-splitter` directly (see `src/xmp.rs` above), and
+the never-implemented stub was removed from the workspace entirely
+(2026-11-26) rather than kept around undecided. If a separate import
+step is ever needed (e.g. for Darktable grouping, which is `library.db`-
+only and can't live in a sidecar -- see below), that's `darktable-
+import-xmp`'s job, not something to re-add here.
 
 ## Grouping is library.db-only, not something a sidecar can carry
 
