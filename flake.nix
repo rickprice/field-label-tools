@@ -21,6 +21,8 @@
           libxcursor
           libxrandr
           libxi
+          # cpal (ltc.rs's timecode audio output) links ALSA on Linux.
+          alsa-lib
         ];
     in
     {

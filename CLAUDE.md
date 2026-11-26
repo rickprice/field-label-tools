@@ -85,16 +85,31 @@ label-qr-gui/      egui/eframe appliance. LabelApp holds the five
                     everything else on the page (the two features don't
                     interact). Bit-level frame format (which bits hold
                     frame/seconds/minutes/hours BCD fields, the 16-bit
-                    sync word, biphase mark coding's transition rule)
-                    was confirmed against SMPTE 12M's published layout,
-                    not written from memory -- see the long comment
-                    directly above `LTC_WORKLET_SOURCE` for the full bit
-                    table. Drop-frame counting isn't implemented (the
-                    29.97fps option is non-drop, which drifts slowly from
-                    true wall-clock time but is simpler); user-bit/flag-
-                    bit fields are left at 0 (unused) -- this only needs
-                    to carry H:M:S:F correctly for an auto-sync tool to
-                    correlate separate recordings' audio tracks.
+                    sync word, biphase mark coding's transition rule) was
+                    confirmed against SMPTE 12M's published layout, not
+                    written from memory -- see the long comment directly
+                    above `LTC_WORKLET_SOURCE` for the full bit table.
+                    Seconds-tens and minutes-tens are **3-bit** fields
+                    (24-26, 40-42; a 1-bit flag follows each, at 27/43) --
+                    initially written as 2-bit fields (which can only
+                    represent 0-3, not the 0-5 a tens digit needs), a bug
+                    that produced completely plausible-looking output for
+                    any tens digit 0-3 and only surfaced once a test
+                    happened to start at :58 and decode back as :18 (see
+                    the verification note below -- this is exactly the
+                    kind of error a real decode catches that eyeballing a
+                    waveform or counting total bits never would, since
+                    2-bit-tens-plus-2-bit-flag and 3-bit-tens-plus-1-bit-
+                    flag both sum to the same 64 bits). 29.97 Drop-Frame
+                    is implemented (skips displayed frame numbers 0/1 at
+                    the start of every minute not divisible by 10, sets
+                    bit 10) alongside a separate 29.97 Non-Drop option
+                    (simpler, drifts ~3.6s/hour from true wall-clock
+                    time) -- see `firstValidFrame()`. Other user-bit/
+                    flag-bit fields are left at 0 (unused) -- this only
+                    needs to carry H:M:S:F (and drop-frame's bit 10)
+                    correctly for an auto-sync tool to correlate separate
+                    recordings' audio tracks.
 
                     Runs inside an AudioWorklet (loaded from a Blob URL,
                     not a second file, to keep this page single-file) --
@@ -121,20 +136,25 @@ label-qr-gui/      egui/eframe appliance. LabelApp holds the five
                     estimating bit-cell duration from the data itself
                     rather than reusing any constant from the generator)
                     -- decoded frame numbers incremented by exactly 1 and
-                    rolled over correctly (24 at 25fps, 29 at 29.97fps) at
-                    every sync-word position across all four fps options.
-                    Separately confirmed via a real headless-Chrome click
-                    on the Start Timecode button that the whole pipeline
-                    (AudioContext creation, worklet loading, message
-                    passing, readout update) wires up and produces a
-                    correctly wall-clock-jam-synced first tick --
-                    continuous real-time playback through actual audio
-                    hardware could not be verified in this sandbox (no
-                    real audio output device, so headless Chrome's audio
-                    render graph only processes an initial burst rather
-                    than pacing in real time) and is worth a quick manual
-                    check in an actual browser before relying on this for
-                    a real multi-camera shoot.
+                    rolled over correctly across all four fps options, a
+                    drop-frame minute boundary both where the skip should
+                    (non-tens minute) and shouldn't (tens minute) happen,
+                    and an hour/midnight rollover -- using starting values
+                    that specifically exercise every tens digit 0-5 (not
+                    just the first test's :20/:30, which is what let the
+                    3-bit-field bug above slip past initially). Neither
+                    harness is part of this repo. Separately confirmed via
+                    a real headless-Chrome click on the Start Timecode
+                    button that the whole pipeline (AudioContext creation,
+                    worklet loading, message passing, readout update)
+                    wires up and produces a correctly wall-clock-jam-
+                    synced first tick -- continuous real-time playback
+                    through actual audio hardware could not be verified in
+                    this sandbox (no real audio output device, so headless
+                    Chrome's audio render graph only processes an initial
+                    burst rather than pacing in real time) and is worth a
+                    quick manual check in an actual browser before relying
+                    on this for a real multi-camera shoot.
                     `label-qr-gui --export-web <DIR>` (main.rs, not part
                     of web/index.html itself) embeds both files via
                     `include_str!` and writes them out verbatim instead of
@@ -142,6 +162,30 @@ label-qr-gui/      egui/eframe appliance. LabelApp holds the five
                     install`/crates.io install (no GitHub checkout) can
                     still get this page; see export_web()'s tests for the
                     byte-identity check against the embedded strings.
+  src/ltc.rs         Native-audio port of web/index.html's
+                    LTC_WORKLET_SOURCE, for the same Timecode Warble
+                    feature in the native GUI -- `LtcGenerator` is a
+                    direct line-by-line translation of the JS state
+                    machine (build_frame_bits/first_valid_frame/segment-
+                    stepping advance()), deliberately kept independent of
+                    any audio I/O library so its correctness is testable
+                    without a real device. main.rs's `start_ltc_stream`
+                    is the only place that touches `cpal` (ALSA on
+                    Linux, via flake.nix's `alsa-lib` -- a *build-time*
+                    dependency here, unlike photo-splitter's ffmpeg,
+                    since cpal links against libasound rather than
+                    shelling out to a CLI tool). Keep the two
+                    implementations in sync if either changes; ltc.rs's
+                    own tests include a from-scratch Rust biphase
+                    demodulator (independent of LtcGenerator's own bit-
+                    stepping assumptions) that round-trips all four fps
+                    options, both drop-frame skip and no-skip minute
+                    boundaries, and a midnight rollover -- ported
+                    straight from the JS version's validation approach,
+                    and it came out correct on the first try specifically
+                    *because* it was ported after the web version's 2-bit-
+                    vs-3-bit tens-field bug (see web/index.html's doc
+                    comment) was already found and fixed.
 photo-splitter/     scans a directory of time-ordered photos (EXIF
                     DateTimeOriginal, falling back to mtime), decodes
                     each QR-marker frame via rqrr, applies configured

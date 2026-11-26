@@ -45,15 +45,18 @@ afterward.
    `fields.example.json` into `DIR` (both are embedded in the binary via
    `include_str!`) instead of launching the GUI. ✅ implemented.
 
-   The page also has a **Timecode Warble** section, independent of the QR
-   code — a "Start Timecode" button plays a continuous SMPTE LTC audio
-   signal (24/25/29.97-NDF/30fps) through the device's audio output via
-   the Web Audio API. Feed that into a camera or audio recorder's mic
-   input to help auto-sync tools (DaVinci Resolve, PluralEyes, etc.)
-   align multiple cameras/audio recordings afterward. It jam-syncs to the
-   device's own clock when started and then free-runs — there's no
-   external time reference, so how well multiple devices line up depends
-   on how well their clocks already agree. ✅ implemented.
+   Both the web page and the native GUI have a **Timecode Warble**
+   section, independent of the QR code — a "Start Timecode" button plays
+   a continuous SMPTE LTC audio signal (24/25/29.97-Non-Drop/29.97-Drop-
+   Frame/30fps) through the device's audio output (the Web Audio API on
+   the page, [`cpal`](https://crates.io/crates/cpal) in the native GUI —
+   same bit-generation logic ported between the two, see `ltc.rs`). Feed
+   that into a camera or audio recorder's mic input to help auto-sync
+   tools (DaVinci Resolve, PluralEyes, etc.) align multiple cameras/audio
+   recordings afterward. It jam-syncs to the device's own clock when
+   started and then free-runs — there's no external time reference, so
+   how well multiple devices line up depends on how well their clocks
+   already agree. ✅ implemented.
 2. **`photo-splitter`** — a CLI that walks a directory of time-ordered
    photos, treats each QR-code frame as the start of a new group, and
    moves everything up to the next QR frame into
@@ -239,6 +242,10 @@ nix develop        # dev shell with rustc/cargo/clippy/rustfmt, the
 `pkgs.libraw` + `pkgs.rustPlatform.bindgenHook` in `flake.nix`. On other
 platforms, install LibRaw's dev package (e.g. `libraw-dev` on
 Debian/Ubuntu) and a libclang (e.g. `libclang-dev`) before building.
+
+`label-qr-gui`'s Timecode Warble feature links ALSA via `cpal` on Linux
+(see `flake.nix`'s `alsa-lib`); on other platforms, install ALSA's dev
+package (e.g. `libasound2-dev` on Debian/Ubuntu) before building.
 
 ## License
 

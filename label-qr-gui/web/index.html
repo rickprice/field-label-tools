@@ -164,7 +164,8 @@
       <select id="f-ltc-fps">
         <option value="24">24 fps</option>
         <option value="25" selected>25 fps</option>
-        <option value="29.97">29.97 fps (NDF)</option>
+        <option value="29.97">29.97 fps (Non-Drop)</option>
+        <option value="29.97df">29.97 fps (Drop-Frame)</option>
         <option value="30">30 fps</option>
       </select>
       <button id="ltc-toggle" type="button">Start Timecode</button>
@@ -2735,22 +2736,32 @@ qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
    * against SMPTE 12M's published layout (2026-11-26), not guessed:
    *   bits 0-3 frame units, 4-7 user bits 1, 8-9 frame tens,
    *   10 drop-frame flag, 11 color-frame flag, 12-15 user bits 2,
-   *   16-19 seconds units, 20-23 user bits 3, 24-25 seconds tens,
-   *   26-27 flag bits, 28-31 user bits 4, 32-35 minutes units,
-   *   36-39 user bits 5, 40-41 minutes tens, 42-43 flag bits,
+   *   16-19 seconds units, 20-23 user bits 3, 24-26 seconds tens (3 bits,
+   *   0-5 -- not 2 bits/0-3, which can't actually hold a tens digit of 4
+   *   or 5; confirmed the hard way, see the verification note below),
+   *   27 flag bit, 28-31 user bits 4, 32-35 minutes units,
+   *   36-39 user bits 5, 40-42 minutes tens (3 bits, same reason), 43 flag bit,
    *   44-47 user bits 6, 48-51 hours units, 52-55 user bits 7,
    *   56-57 hours tens, 58-59 flag bits, 60-63 user bits 8,
    *   64-79 sync word 0011111111111101.
    * User-bit and flag-bit fields are left at 0 (unused) -- this
-   * generator only needs H:M:S:F to round-trip correctly for an
-   * auto-sync tool to correlate separate recordings' audio tracks, not
-   * full SMPTE-spec compliance for every optional field. Drop-frame
-   * counting (skipping frame numbers at certain minute boundaries, used
-   * by real 29.97fps drop-frame timecode to track wall-clock time
-   * exactly over long durations) isn't implemented either -- the 29.97
-   * option here is non-drop-frame, which drifts from true wall-clock
-   * time by about 3.6 seconds/hour but is simpler and still gives
-   * auto-sync tools a steadily-running signal to correlate against.
+   * generator only needs H:M:S:F (and, for 29.97 Drop-Frame, bit 10) to
+   * round-trip correctly for an auto-sync tool to correlate separate
+   * recordings' audio tracks, not full SMPTE-spec compliance for every
+   * optional field.
+   *
+   * 29.97 Drop-Frame: true 29.97fps is 0.1% slower than nominal 30fps,
+   * so a frame counter that naively counts 0-29 every second (like the
+   * "29.97 Non-Drop" option here does) drifts from true wall-clock time
+   * by about 3.6 seconds/hour. Drop-frame timecode corrects this not by
+   * dropping actual frames/samples, just by skipping frame *numbers* 00
+   * and 01 at the start of every minute except minutes divisible by 10
+   * (:00, :10, :20, :30, :40, :50) -- e.g. ...;00:59:29 jumps straight to
+   * ...;01:00:02, but ...;09:59:29 jumps to ...;10:00:00 unchanged. This
+   * is purely a relabeling of which H:M:S:F value gets sent with which
+   * audio bit-cell; the underlying bit-cell rate is identical to Non-
+   * Drop at the same fps. Bit 10 (the drop-frame flag) is set whenever
+   * this option is selected, left 0 otherwise.
    *
    * Biphase mark coding (BMC), per bit-cell: a transition always happens
    * at the start of the cell; a '1' bit has one additional transition
@@ -2761,34 +2772,56 @@ qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
    * main thread, so normal page activity (typing in a field, layout) can
    * never glitch/corrupt the bit timing.
    *
-   * Verified end-to-end (2026-11-26): generated 2 seconds of audio with
-   * this exact bit-building/BMC logic via a Node harness, wrote it to a
-   * WAV file, and decoded it with an independently-written Python
-   * biphase demodulator (reading transition timings directly from the
-   * PCM samples, not reusing any of this code's assumptions) -- the
-   * decoded H:M:S:F and sync-word position matched the encoder's input
-   * exactly. Neither harness is part of this repo; this is the same
-   * "decode with a real/independent reader" verification approach used
-   * for the QR library above.
+   * Verified end-to-end (2026-11-26): generated audio with this exact
+   * bit-building/BMC logic via a Node harness, wrote it to a WAV file,
+   * and decoded it with an independently-written Python biphase
+   * demodulator (reading transition timings directly from the PCM
+   * samples, not reusing any of this code's assumptions) -- across all
+   * four fps options, a drop-frame minute boundary both where it should
+   * skip (non-tens minute) and shouldn't (tens minute), and an hour/
+   * midnight rollover. Neither harness is part of this repo; this is the
+   * same "decode with a real/independent reader" verification approach
+   * used for the QR library above. This is exactly what caught a real
+   * bug before it shipped: seconds-tens and minutes-tens were first
+   * written as 2-bit fields (bits 24-25 / 40-41), which can only hold
+   * 0-3 -- any test using a tens digit below 4 looked completely correct
+   * (the earliest tests all used e.g. :20, :30), until a drop-frame test
+   * that happened to start at :58 decoded back as :18. Fixed to the
+   * correct 3-bit fields (24-26 / 40-42) once the real bit allocation was
+   * confirmed against the arithmetic (64 bits of BCD/flag/user fields
+   * must sum to exactly 64 before the 16-bit sync word, which a 2-bit
+   * tens field also satisfies -- so the bit *count* alone doesn't catch
+   * this, only an actual decode does).
    * -------------------------------------------------------------------- */
 
   const LTC_WORKLET_SOURCE = `
-    function buildFrameBits(h, m, s, f) {
+    function buildFrameBits(h, m, s, f, dropFrame) {
       const bits = new Uint8Array(80);
       const setBcd = (start, width, value) => {
         for (let i = 0; i < width; i++) bits[start + i] = (value >> i) & 1;
       };
       setBcd(0, 4, f % 10);
       setBcd(8, 2, Math.floor(f / 10));
+      bits[10] = dropFrame ? 1 : 0;
       setBcd(16, 4, s % 10);
-      setBcd(24, 2, Math.floor(s / 10));
+      setBcd(24, 3, Math.floor(s / 10));
       setBcd(32, 4, m % 10);
-      setBcd(40, 2, Math.floor(m / 10));
+      setBcd(40, 3, Math.floor(m / 10));
       setBcd(48, 4, h % 10);
       setBcd(56, 2, Math.floor(h / 10));
       const sync = [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1];
       for (let i = 0; i < 16; i++) bits[64 + i] = sync[i];
       return bits;
+    }
+
+    // Drop-frame skips displayed frame *numbers* 0 and 1 at the start of
+    // every minute except ones divisible by 10 -- see the module doc
+    // comment above LTC_WORKLET_SOURCE for why. Only ever nudges f from
+    // 0/1 up to 2; a no-op for every other f, so it's safe to call
+    // unconditionally right after f is set to 0 at a minute boundary
+    // (both on the initial jam-sync seed and on every later rollover).
+    function firstValidFrame(f, m, dropFrame) {
+      return dropFrame && m % 10 !== 0 && f < 2 ? 2 : f;
     }
 
     class LtcProcessor extends AudioWorkletProcessor {
@@ -2800,14 +2833,18 @@ qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
           const msg = e.data;
           if (msg.type === 'start') {
             this.fps = msg.fps;
-            // 29.97 NDF counts frames 0-29 per second, same as true 30fps.
+            this.dropFrame = !!msg.dropFrame;
+            // Both Drop-Frame and Non-Drop count frames 0-29 per second
+            // at 29.97fps -- Drop-Frame only skips which *numbers* get
+            // displayed at minute boundaries, not how many frames exist
+            // per second.
             this.nominalFrameCount = Math.round(this.fps);
             this.samplesPerBit = sampleRate / (this.fps * 80);
             this.h = msg.h;
             this.m = msg.m;
             this.s = msg.s;
-            this.f = msg.f;
-            this.frameBits = buildFrameBits(this.h, this.m, this.s, this.f);
+            this.f = firstValidFrame(msg.f, msg.m, this.dropFrame);
+            this.frameBits = buildFrameBits(this.h, this.m, this.s, this.f, this.dropFrame);
             this.bitIndex = 0;
             this.subhalf = 0;
             this.polarity = 1;
@@ -2846,9 +2883,10 @@ qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
                   this.m = 0;
                   this.h = (this.h + 1) % 24;
                 }
+                this.f = firstValidFrame(this.f, this.m, this.dropFrame);
               }
             }
-            this.frameBits = buildFrameBits(this.h, this.m, this.s, this.f);
+            this.frameBits = buildFrameBits(this.h, this.m, this.s, this.f, this.dropFrame);
             this.port.postMessage({ h: this.h, m: this.m, s: this.s, f: this.f });
           }
         }
@@ -2917,11 +2955,14 @@ qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
     // Jam-sync to this device's current wall-clock time of day; the
     // processor free-runs from here (see its module doc above for why
     // that's the realistic amount of "sync" this can offer).
-    const fps = parseFloat(els.ltcFps.value);
+    const fpsValue = els.ltcFps.value;
+    const fps = parseFloat(fpsValue); // parseFloat("29.97df") === 29.97
+    const dropFrame = fpsValue.endsWith('df');
     const now = new Date();
     node.port.postMessage({
       type: 'start',
       fps,
+      dropFrame,
       h: now.getHours(),
       m: now.getMinutes(),
       s: now.getSeconds(),
