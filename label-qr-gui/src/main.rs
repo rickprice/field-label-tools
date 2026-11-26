@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use chrono::{SecondsFormat, Utc};
 use clap::Parser;
 use eframe::egui;
 use qrcode::{Color as QrColor, EcLevel, QrCode};
@@ -70,6 +71,10 @@ impl LabelApp {
         obj.insert("location".into(), json!(self.location));
         obj.insert("id".into(), json!(self.id));
         obj.insert("name".into(), json!(self.name));
+        obj.insert(
+            "timestamp_utc".into(),
+            json!(Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)),
+        );
 
         let mut extra_obj = Map::new();
         for (field, value) in &self.extra {
@@ -94,6 +99,12 @@ impl LabelApp {
 
 impl eframe::App for LabelApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // The QR's embedded timestamp should track "now" even if the form
+        // sits idle with no input between filling it out and photographing
+        // the screen, so keep repainting instead of waiting for an event.
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs(1));
+
         egui::Panel::left("metadata")
             .resizable(false)
             .default_size(420.0)

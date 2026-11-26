@@ -10,8 +10,9 @@ label-qr-gui/      egui/eframe appliance. LabelApp holds the four
                     built-in fields plus `extra: Vec<(ExtraFieldDef,
                     String)>` loaded from an optional `--config` TOML
                     file (see fields.example.toml). `payload()`
-                    serializes everything as JSON for the QR code,
-                    `folder_name()` previews the eventual
+                    serializes everything as JSON for the QR code
+                    (always including a `timestamp_utc` captured fresh
+                    on each draw), `folder_name()` previews the eventual
                     `<Project>-<Location>-<ID>-<Name>` directory name
                     from the four built-in fields only -- extra fields
                     never affect the folder name, only the QR's "extra"
@@ -35,7 +36,8 @@ darktable-export/   not yet implemented. Will convert those split
 ## The QR payload is JSON, not the dash-joined string
 
 `label-qr-gui` encodes the QR as a JSON object (`{"project":...,
-"location":..., "id":..., "name":..., "extra":{...}}`), not as the
+"location":..., "id":..., "name":..., "timestamp_utc":...,
+"extra":{...}}`), not as the
 `<Project>-<Location>-<ID>-<Name>` string shown in the UI preview. JSON
 round-trips safely even if a field itself contains a dash, and the
 `"extra"` map is open-ended (field names come from whatever config file
@@ -44,6 +46,14 @@ dash-joined string only as a human-readable folder-name preview) when
 `photo-splitter` is built. `photo-splitter` must treat `"extra"`'s keys
 as unknown/arbitrary -- never assume a fixed schema -- and the key is
 absent entirely when no extra fields were configured, not just empty.
+
+`timestamp_utc` is not stored as app state -- it's computed fresh with
+`Utc::now()` every time `payload()` runs. `ui()` calls
+`ctx.request_repaint_after(Duration::from_secs(1))` unconditionally so
+egui keeps redrawing (and thus recomputing the timestamp) even when the
+form is left idle with no input, since the point is for the embedded
+time to reflect whenever the screen is actually photographed, not
+whenever it was last edited.
 
 ## Workflow notes
 

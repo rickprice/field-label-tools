@@ -50,8 +50,13 @@ configured field's value ends up in the QR's JSON payload under
 `"extra"` (empty values are omitted), e.g.:
 
 ```json
-{"project":"P1","location":"North Ridge","id":3,"name":"overview","extra":{"Surveyor":"J. Price"}}
+{"project":"P1","location":"North Ridge","id":3,"name":"overview","timestamp_utc":"2026-11-26T00:10:00Z","extra":{"Surveyor":"J. Price"}}
 ```
+
+The QR also always embeds `timestamp_utc` (RFC 3339, UTC, second
+precision) — the time the QR was last redrawn, not shown on the form
+itself. The app forces a repaint at least once a second so this stays
+current even if the form sits idle before the screen is photographed.
 
 `photo-splitter` will need to treat `"extra"` as an open map (field
 names it's never seen are still valid) rather than a fixed schema,
