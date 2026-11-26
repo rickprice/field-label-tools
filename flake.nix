@@ -72,8 +72,20 @@
             nativeBuildInputs = [
               pkgs.pkg-config
               pkgs.rustPlatform.bindgenHook
+              pkgs.makeWrapper
             ];
             buildInputs = [ pkgs.libraw ];
+            # libraw_r links libgomp, so by default each rayon worker
+            # thread's LibRaw call spawns its own OpenMP thread team --
+            # 12 rayon workers x ~12 OpenMP threads each oversubscribes a
+            # 12-core machine ~12x. OMP_NUM_THREADS=1 leaves rayon's
+            # cross-file parallelism as the only parallelism layer.
+            # --set-default so an explicit OMP_NUM_THREADS in the caller's
+            # environment still wins.
+            postFixup = ''
+              wrapProgram $out/bin/photo-splitter \
+                --set-default OMP_NUM_THREADS 1
+            '';
             meta = with pkgs.lib; {
               description = "Splits a directory of time-ordered photos into per-shoot folders using QR-code marker frames";
               homepage = "https://github.com/rickprice/field-label-tools";
@@ -103,6 +115,8 @@
             ];
             buildInputs = guiLibs pkgs ++ [ pkgs.libraw ];
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (guiLibs pkgs);
+            # See photo-splitter's postFixup above for why.
+            OMP_NUM_THREADS = "1";
           };
         }
       );

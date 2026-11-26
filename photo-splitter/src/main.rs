@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use exif::{In, Tag, Value};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 mod libraw_sys;
@@ -89,12 +90,21 @@ fn run(args: &Args) -> Result<()> {
 
     entries.sort_by_key(|path| (captured_at(path), path.clone()));
 
+    // Decoding (the expensive step -- LibRaw's dcraw_process per RAW file)
+    // is independent per file, so it's done in parallel across all of
+    // them first. Grouping, right below, depends on seeing markers in
+    // time order and stays strictly sequential.
+    let decoded: Vec<Option<LabelPayload>> = entries
+        .par_iter()
+        .map(|path| decode_qr(path, args.fast))
+        .collect();
+
     let mut current: Option<Group> = None;
     let mut unmatched = 0usize;
     let mut groups_written = 0usize;
 
-    for path in entries {
-        match decode_qr(&path, args.fast) {
+    for (path, label) in entries.into_iter().zip(decoded) {
+        match label {
             Some(label) => {
                 if let Some(group) = current.take() {
                     finish_group(group, &args.dir, args.dry_run)?;

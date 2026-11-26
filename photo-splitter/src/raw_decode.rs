@@ -50,6 +50,11 @@ pub fn decode_default(path: &Path) -> Option<image::GrayImage> {
     let c_path = CString::new(path.to_str()?).ok()?;
     let processor = Processor::new()?;
 
+    // Skip full demosaic interpolation (AHD/VNG/etc.) and just average each
+    // 2x2 Bayer block into one pixel -- quarter resolution, but an order of
+    // magnitude faster, and QR detection doesn't need photo-quality output.
+    unsafe { (*processor.0).params.half_size = 1 };
+
     let rc = unsafe { sys::libraw_open_file(processor.0, c_path.as_ptr()) };
     if rc != 0 {
         log::debug!(

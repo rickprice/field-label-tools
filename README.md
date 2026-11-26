@@ -30,21 +30,38 @@ afterward.
 
    RAW files (CR2/NEF/ARW/DNG/ORF/PEF, matching `darktable-import-xmp`'s
    supported list) are the primary target; JPEG/PNG/TIFF/BMP/WebP are
-   also supported. By default, RAW files are decoded with LibRaw's full
-   `dcraw_process` pipeline (demosaic, default white balance, LibRaw's
-   default gamma/brightness curve) before scanning for a QR code — the
-   same kind of default rendering most RAW viewers, including
-   Darktable itself, produce. This is slower than reading the
-   embedded EXIF thumbnail, but much more reliably bright/contrasty
-   enough to find the QR regardless of the as-shot exposure, and it's
-   a one-off batch job rather than something run interactively. Pass
-   `--fast` to scan the EXIF thumbnail instead (faster, but
-   thumbnails are often small — commonly ~160×120 — and some cameras
+   also supported. By default, RAW files are decoded with LibRaw's
+   `dcraw_process` pipeline, run in `half_size` mode (block-average
+   demosaic — quarter resolution, much faster than full AHD/VNG
+   interpolation, and QR detection doesn't need photo-quality output)
+   with default white balance and LibRaw's default gamma/brightness
+   curve — the same kind of default rendering most RAW viewers,
+   including Darktable itself, produce. This is slower per file than
+   reading the embedded EXIF thumbnail, but much more reliably
+   bright/contrasty enough to find the QR regardless of the as-shot
+   exposure. Files are decoded in parallel across all available CPU
+   cores (`rayon`); real-world testing against 21 Canon CR2 files
+   (~40MB each) found the whole batch decodes in well under a minute
+   on a 12-core machine, with occasional per-file outliers (LibRaw
+   taking disproportionately long on a specific image for reasons
+   unrelated to file size) determining the tail. Pass `--fast` to scan
+   the EXIF thumbnail instead (much faster, but thumbnails are often
+   small — commonly ~160×120, sometimes framing far too little of the
+   scene to resolve the QR even at that resolution — and some cameras
    omit one entirely, so a marker frame scanned this way can be missed
-   and silently merged into the previous group). Run with `--dry-run`
-   first and check the log output (`RUST_LOG=debug` for more detail)
-   before trusting either mode on a real shoot, especially the first
-   time with a new camera.
+   and silently merged into the previous group; confirmed in practice,
+   not just in theory). Run with `--dry-run` first and check the log
+   output (`RUST_LOG=debug` for more detail) before trusting either
+   mode on a real shoot, especially the first time with a new camera.
+
+   **If you build/run outside the `flake.nix` package or dev shell**,
+   set `OMP_NUM_THREADS=1` yourself. `libraw_r` links `libgomp`
+   (OpenMP), and without this, each of rayon's per-file worker threads
+   spawns its own OpenMP thread team internally — e.g. 12 rayon workers
+   × ~12 OpenMP threads each can oversubscribe a 12-core machine ~12x,
+   turning the intended parallel speedup into thread-contention
+   thrashing instead. The Nix package and dev shell both set this for
+   you already.
 
    To see *why* a particular marker frame wasn't recognized, run with
    `RUST_LOG=trace`: every photo's exact QR-scan image (the LibRaw

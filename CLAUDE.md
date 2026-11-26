@@ -32,22 +32,36 @@ photo-splitter/     scans a directory of time-ordered photos (EXIF
                     complete. With RUST_LOG=trace, dump_qr_debug_image()
                     saves the exact image handed to the QR detector for
                     every photo into a `_qr_debug/` folder next to it.
+                    Decoding all files (the expensive part) happens in
+                    one `entries.par_iter().map(decode_qr).collect()`
+                    BEFORE the grouping loop -- grouping itself must stay
+                    strictly sequential (it depends on seeing markers in
+                    time order), so it's cheap pure bookkeeping once
+                    `decoded` already holds every file's result.
   src/raw_decode.rs  Two ways to get a grayscale image out of a RAW file
                     to scan for a QR code. `decode_default` (the
-                    default) runs LibRaw's full dcraw_process pipeline
-                    via FFI bindings generated in src/libraw_sys.rs --
-                    this is the "default light leveling and contrast"
-                    path, chosen over the cheap EXIF-thumbnail route
-                    specifically because thumbnails are often too small
-                    or absent, and getting QR detection wrong silently
-                    merges two shoots together. `decode_thumbnail`
-                    (`--fast`) is the old cheap fallback,
-                    kept for when a full LibRaw decode per photo is too
-                    slow. See src/libraw_sys.rs's module doc for why
-                    this is hand-bound via bindgen rather than an
-                    existing crate (both `rawler` and the published
-                    LibRaw Rust bindings were unsuitable -- checked
-                    2026-11-26, worth re-checking if revisiting this).
+                    default) runs LibRaw's dcraw_process pipeline with
+                    `params.half_size = 1` (block-average demosaic --
+                    quarter resolution, skips the expensive AHD/VNG
+                    interpolation entirely, since QR detection doesn't
+                    need photo-quality output) via FFI bindings
+                    generated in src/libraw_sys.rs -- this is the
+                    "default light leveling and contrast" path, chosen
+                    over the cheap EXIF-thumbnail route specifically
+                    because thumbnails are often too small/absent (or
+                    just frame too little of the QR within the shot),
+                    and getting QR detection wrong silently merges two
+                    shoots together. Confirmed against 21 real Canon CR2
+                    files (2026-11-26): the EXIF-thumbnail path (--fast)
+                    found zero markers; decode_default found them all.
+                    `decode_thumbnail` (`--fast`) is the old cheap
+                    fallback, kept for when a full LibRaw decode per
+                    photo is too slow. See src/libraw_sys.rs's module
+                    doc for why this is hand-bound via bindgen rather
+                    than an existing crate (both `rawler` and the
+                    published LibRaw Rust bindings were unsuitable --
+                    checked 2026-11-26, worth re-checking if revisiting
+                    this).
 darktable-export/   not yet implemented. Will convert those split
                     directories into XMP sidecars for the sibling
                     `darktable-import-xmp` repo to pick up — this crate
@@ -104,10 +118,39 @@ whenever it was last edited.
   realistic), so its tests only cover the FFI plumbing itself
   (init/close lifecycle, graceful failure on a bad path/garbage file)
   -- not that the full dcraw_process pipeline actually produces a
-  usable image from a real camera file. Before trusting
-  `photo-splitter` on a real shoot with a new camera, run it with
-  `--dry-run` and `RUST_LOG=debug` against a handful of real RAW files
-  first.
+  usable image from a real camera file. This was validated manually
+  against 21 real Canon CR2 files on 2026-11-26 (see below); before
+  trusting `photo-splitter` on a real shoot with a *new* camera, repeat
+  that kind of check -- run with `--dry-run` and `RUST_LOG=debug`
+  against a handful of real RAW files first.
+- **libraw_r links libgomp (OpenMP).** Combining rayon's per-file
+  parallelism with LibRaw's own internal OpenMP parallelism
+  oversubscribes badly -- confirmed in practice: 12 rayon workers each
+  spawning their own ~12-thread OpenMP team produced 145 OS threads on
+  a 12-core machine, all contending rather than working (CPU usage
+  stuck around 150%, i.e. ~1.2 cores' worth of real work, the entire
+  time). `OMP_NUM_THREADS=1` fixes this by leaving rayon as the only
+  parallelism layer; both the Nix package (`postFixup` wrapProgram
+  `--set-default`) and the dev shell set this already, so it only
+  bites if you build/run outside of Nix entirely. Verify empirically,
+  don't guess, if you ever revisit this: check `ldd` on the actual
+  `libraw_r.so` being linked (there can be multiple outputs/paths for
+  the same nixpkgs attribute -- `nix build nixpkgs#libraw` alone
+  pointed at a `bin`-only output with no `.so` in it at all; the
+  shared libraries were in `nixpkgs#libraw.lib`), and watch
+  `/proc/<pid>/task/*/wchan` for `futex_do_wait` plus total CPU-time
+  (sum of utime+stime across threads) vs wall-clock elapsed as the
+  simplest way to confirm whether real parallelism is happening at
+  all, before assuming code is at fault.
+- Individual RAW files can take drastically longer than others to
+  decode via LibRaw for reasons unrelated to file size (observed: one
+  36MB file took 10+ minutes alone while twenty 36-44MB files from the
+  same camera, same session, each took 5-22 seconds). In a
+  parallel batch this shows up as a single straggler dominating the
+  tail -- don't mistake it for a parallelism bug before checking
+  whether it's actually just one or two outlier files (e.g. instrument
+  per-file start/end timestamps temporarily, as was done to diagnose
+  this on 2026-11-26) rather than assuming the whole batch is slow.
 - `RUST_LOG=trace` makes `decode_qr` dump the exact grayscale image it
   fed to `rqrr` into a `_qr_debug/` folder next to each source photo
   (`dump_qr_debug_image`/`write_qr_debug_image`), for diagnosing why a
