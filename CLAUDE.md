@@ -66,6 +66,13 @@ label-qr-gui/      egui/eframe appliance. LabelApp holds the five
                     file:// in a browser that blocks fetch() of local
                     files) or by editing DEFAULT_EXTRA_FIELDS directly,
                     which works regardless of how the file was opened.
+                    `label-qr-gui --export-web <DIR>` (main.rs, not part
+                    of web/index.html itself) embeds both files via
+                    `include_str!` and writes them out verbatim instead of
+                    launching the GUI -- exists so a `cargo
+                    install`/crates.io install (no GitHub checkout) can
+                    still get this page; see export_web()'s tests for the
+                    byte-identity check against the embedded strings.
 photo-splitter/     scans a directory of time-ordered photos (EXIF
                     DateTimeOriginal, falling back to mtime), decodes
                     each QR-marker frame via rqrr, applies configured

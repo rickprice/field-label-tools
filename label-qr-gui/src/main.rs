@@ -18,6 +18,38 @@ struct Args {
     /// in addition to the built-in Project/Location/ID/Name fields
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
+
+    /// Write out the browser-based alternative front end (web/index.html
+    /// and web/fields.example.json from the source repo) into DIR instead
+    /// of launching the GUI -- useful if you installed via `cargo install`
+    /// / crates.io and don't have a GitHub checkout to copy it from.
+    #[arg(long, value_name = "DIR")]
+    export_web: Option<PathBuf>,
+}
+
+const WEB_INDEX_HTML: &str = include_str!("../web/index.html");
+const WEB_FIELDS_EXAMPLE_JSON: &str = include_str!("../web/fields.example.json");
+
+/// Writes the embedded copies of web/index.html and web/fields.example.json
+/// into `dir` (created if missing). Kept separate from `main` so it's
+/// testable without going through Args/eframe at all.
+fn export_web(dir: &Path) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+
+    let index_path = dir.join("index.html");
+    std::fs::write(&index_path, WEB_INDEX_HTML)
+        .with_context(|| format!("writing {}", index_path.display()))?;
+
+    let fields_path = dir.join("fields.example.json");
+    std::fs::write(&fields_path, WEB_FIELDS_EXAMPLE_JSON)
+        .with_context(|| format!("writing {}", fields_path.display()))?;
+
+    log::info!(
+        "wrote {} and {}",
+        index_path.display(),
+        fields_path.display()
+    );
+    Ok(())
 }
 
 #[derive(Deserialize, Default)]
@@ -215,6 +247,14 @@ fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
 
+    if let Some(dir) = &args.export_web {
+        if let Err(err) = export_web(dir) {
+            log::error!("{err:#}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
     let extra_fields = match &args.config {
         Some(path) => match load_fields_config(path) {
             Ok(fields) => fields,
@@ -238,4 +278,30 @@ fn main() -> eframe::Result {
         options,
         Box::new(move |_cc| Ok(Box::new(LabelApp::new(extra_fields)))),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_web_writes_both_files_with_the_expected_content() {
+        let dir = tempfile::tempdir().unwrap();
+        export_web(dir.path()).unwrap();
+
+        let index = std::fs::read_to_string(dir.path().join("index.html")).unwrap();
+        assert!(index.contains("<title>Field Label</title>"));
+        assert!(index.contains("DEFAULT_EXTRA_FIELDS"));
+
+        let fields = std::fs::read_to_string(dir.path().join("fields.example.json")).unwrap();
+        assert!(fields.contains("Surveyor"));
+    }
+
+    #[test]
+    fn export_web_creates_the_target_directory_if_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("a/b/c");
+        export_web(&nested).unwrap();
+        assert!(nested.join("index.html").is_file());
+    }
 }

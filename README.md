@@ -35,7 +35,10 @@ afterward.
    encoding is handled by a vendored, unmodified copy of Kazuhiko Arase's
    MIT-licensed [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator)
    — see the license comment at the top of its embedded `<script>` block.
-   ✅ implemented.
+   Installed via `cargo install`/crates.io rather than a GitHub checkout?
+   `label-qr-gui --export-web <DIR>` writes `index.html` and
+   `fields.example.json` into `DIR` (both are embedded in the binary via
+   `include_str!`) instead of launching the GUI. ✅ implemented.
 2. **`photo-splitter`** — a CLI that walks a directory of time-ordered
    photos, treats each QR-code frame as the start of a new group, and
    moves everything up to the next QR frame into

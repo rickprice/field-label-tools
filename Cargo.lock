@@ -1416,7 +1416,7 @@ dependencies = [
 
 [[package]]
 name = "label-qr-gui"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1428,6 +1428,7 @@ dependencies = [
  "qrcode",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
 ]
 
@@ -2041,7 +2042,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "photo-splitter"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "bindgen",
