@@ -24,7 +24,7 @@ afterward.
    comes from the marker's embedded `timestamp_utc`, not the photo's own
    EXIF capture time. If two shoots share Project/Location/Name *and*
    land on the same day, the second one's ID is appended to the date
-   (`<yyyy-mm-dd>-<ID>/`) to disambiguate — ID stays invisible in the
+   (`<yyyy-mm-dd>_<ID>/`) to disambiguate — ID stays invisible in the
    common case, only showing up when it's actually needed. Photos
    themselves are ordered by EXIF `DateTimeOriginal` (falling back to
    file mtime), and each group is only moved once its boundary is known

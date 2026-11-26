@@ -27,7 +27,7 @@ struct Args {
     /// Directory containing the photos to split. Each shoot's photos are
     /// moved out of here into a new
     /// `<Project>/<Location>/<Name>/<yyyy-mm-dd>/` directory (the date
-    /// comes from the marker's embedded timestamp; `-<ID>` is appended to
+    /// comes from the marker's embedded timestamp; `_<ID>` is appended to
     /// the date only if two shoots collide on the same day) once the next
     /// marker (or the end of the directory) is found, so partially-processed
     /// shoots are never left half-moved.
@@ -343,14 +343,15 @@ fn group_date(label: &LabelPayload) -> String {
 }
 
 /// `<dir>/<Project>/<Location>/<Name>/<yyyy-mm-dd>`, optionally with the
-/// group's ID appended to the date component (`<yyyy-mm-dd>-<ID>`) to
+/// group's ID appended to the date component (`<yyyy-mm-dd>_<ID>`) to
 /// disambiguate two shoots that share Project/Location/Name and fall on the
 /// same day -- see `finish_group`, which only adds the suffix when the
-/// plain date path is already taken.
+/// plain date path is already taken. Underscore rather than hyphen so it
+/// doesn't read as part of the date itself.
 fn group_dir(dir: &Path, label: &LabelPayload, disambiguate_with_id: bool) -> PathBuf {
     let date = group_date(label);
     let date_component = if disambiguate_with_id {
-        format!("{date}-{}", label.id)
+        format!("{date}_{}", label.id)
     } else {
         date
     };
@@ -473,7 +474,7 @@ mod tests {
             dir.join("P1")
                 .join("North Ridge")
                 .join("overview")
-                .join("2026-11-26-3")
+                .join("2026-11-26_3")
         );
     }
 

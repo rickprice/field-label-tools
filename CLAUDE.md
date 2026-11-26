@@ -36,7 +36,7 @@ photo-splitter/     scans a directory of time-ordered photos (EXIF
                     is already taken (two shoots sharing Project/
                     Location/Name on the same day -- a real case, not
                     just hypothetical, see below), `finish_group` retries
-                    once at `<yyyy-mm-dd>-<ID>/` before giving up; a
+                    once at `<yyyy-mm-dd>_<ID>/` before giving up; a
                     collision at *that* path too still means a genuine
                     `bail!`. A metadata.yaml (the decoded LabelPayload,
                     serde_yaml) goes in the leaf directory alongside the
