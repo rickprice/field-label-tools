@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 mod libraw_sys;
 mod raw_decode;
+mod xmp;
 
 /// RAW extensions matching darktable-import-xmp's supported format list.
 const RAW_EXTENSIONS: &[&str] = &["cr2", "nef", "arw", "dng", "orf", "pef"];
@@ -43,6 +44,22 @@ struct Args {
     /// group. Prefer the default unless a full run is too slow.
     #[arg(long)]
     fast: bool,
+
+    /// Write a <file>.xmp sidecar for every photo with Project, Location,
+    /// Name, and any extra fields as Darktable hierarchical tags under this
+    /// prefix (e.g. `--tag-prefix PricePixel` tags a photo
+    /// `PricePixel|Project|...`). Overrides --config and the default
+    /// config file.
+    #[arg(long)]
+    tag_prefix: Option<String>,
+
+    /// TOML config file (just `tag_prefix = "..."` for now) to read the tag
+    /// prefix from instead of the default config file at
+    /// ~/.config/photo-splitter/config.toml. Unlike the default path, a
+    /// --config path that doesn't exist or doesn't parse is a hard error,
+    /// since it was asked for explicitly.
+    #[arg(long)]
+    config: Option<PathBuf>,
 }
 
 /// The JSON payload label-qr-gui encodes into its QR code.
@@ -79,6 +96,13 @@ fn main() -> Result<()> {
 }
 
 fn run(args: &Args) -> Result<()> {
+    let tag_prefix = xmp::resolve_tag_prefix(args.tag_prefix.as_deref(), args.config.as_deref())?;
+    if tag_prefix.is_none() {
+        log::debug!(
+            "no tag prefix configured (--tag-prefix / --config / default config file); not writing XMP sidecars"
+        );
+    }
+
     let mut entries: Vec<PathBuf> = fs::read_dir(&args.dir)
         .with_context(|| format!("reading directory {}", args.dir.display()))?
         .filter_map(|entry| entry.ok())
@@ -110,7 +134,7 @@ fn run(args: &Args) -> Result<()> {
         match label {
             Some(label) => {
                 if let Some(group) = current.take() {
-                    finish_group(group, &args.dir, args.dry_run)?;
+                    finish_group(group, &args.dir, args.dry_run, tag_prefix.as_deref())?;
                     groups_written += 1;
                 }
                 current = Some(Group::new(label, path));
@@ -129,7 +153,7 @@ fn run(args: &Args) -> Result<()> {
     }
 
     if let Some(group) = current.take() {
-        finish_group(group, &args.dir, args.dry_run)?;
+        finish_group(group, &args.dir, args.dry_run, tag_prefix.as_deref())?;
         groups_written += 1;
     }
 
@@ -336,7 +360,7 @@ fn group_dir(dir: &Path, label: &LabelPayload, disambiguate_with_id: bool) -> Pa
         .join(date_component)
 }
 
-fn finish_group(group: Group, dir: &Path, dry_run: bool) -> Result<()> {
+fn finish_group(group: Group, dir: &Path, dry_run: bool, tag_prefix: Option<&str>) -> Result<()> {
     let plain_dest = group_dir(dir, &group.label, false);
     let dest = if plain_dest.exists() {
         group_dir(dir, &group.label, true)
@@ -369,6 +393,11 @@ fn finish_group(group: Group, dir: &Path, dry_run: bool) -> Result<()> {
         let target = dest.join(file_name);
         fs::rename(member, &target)
             .with_context(|| format!("moving {} to {}", member.display(), target.display()))?;
+
+        if let Some(prefix) = tag_prefix {
+            xmp::write_xmp_sidecar(&target, &group.label, prefix)
+                .with_context(|| format!("writing XMP sidecar for {}", target.display()))?;
+        }
     }
 
     let yaml = serde_yaml::to_string(&group.label)?;
@@ -583,7 +612,7 @@ mod tests {
         let mut group = Group::new(label.clone(), marker.clone());
         group.members.push(member.clone());
 
-        finish_group(group, dir.path(), false).unwrap();
+        finish_group(group, dir.path(), false, None).unwrap();
 
         let dest = group_dir(dir.path(), &label, false);
         assert!(dest.join("marker.jpg").is_file());
@@ -605,7 +634,7 @@ mod tests {
         let label = sample_label();
         let group = Group::new(label.clone(), marker.clone());
 
-        finish_group(group, dir.path(), true).unwrap();
+        finish_group(group, dir.path(), true, None).unwrap();
 
         assert!(marker.exists());
         assert!(!group_dir(dir.path(), &label, false).exists());
@@ -623,7 +652,7 @@ mod tests {
         fs::create_dir_all(group_dir(dir.path(), &label, false)).unwrap();
 
         let group = Group::new(label.clone(), marker.clone());
-        finish_group(group, dir.path(), false).unwrap();
+        finish_group(group, dir.path(), false, None).unwrap();
 
         let dest = group_dir(dir.path(), &label, true);
         assert!(dest.join("marker.jpg").is_file());
@@ -641,7 +670,7 @@ mod tests {
 
         let group = Group::new(label, marker.clone());
 
-        assert!(finish_group(group, dir.path(), false).is_err());
+        assert!(finish_group(group, dir.path(), false, None).is_err());
         assert!(marker.exists(), "marker must not be moved on failure");
     }
 
@@ -695,6 +724,8 @@ mod tests {
             dir: dir.path().to_path_buf(),
             dry_run: false,
             fast: false,
+            tag_prefix: None,
+            config: None,
         })
         .unwrap();
 
@@ -742,6 +773,8 @@ mod tests {
             dir: dir.path().to_path_buf(),
             dry_run: false,
             fast: false,
+            tag_prefix: None,
+            config: None,
         })
         .unwrap();
 

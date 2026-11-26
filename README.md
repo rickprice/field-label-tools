@@ -76,15 +76,43 @@ afterward.
    is saved into a `_qr_debug/` folder next to it, named
    `<original filename>.jpg`. This writes one JPEG per photo, so it's
    gated behind `trace` rather than `debug`.
-3. **`darktable-export`** — a CLI that converts those split, tagged
-   directories into XMP sidecars. 🚧 planned. This is expected to feed
-   into the existing
-   [`darktable-import-xmp`](../darktable-import-xmp) tool, which already
-   imports loose XMP sidecars into Darktable's library database — so
-   this crate's job is just to *produce* sidecars carrying the
-   Project/Location/ID/Name (and any configured extra fields) as
-   Darktable-visible metadata (e.g. IPTC keywords/title), not to talk to
-   the Darktable database directly.
+
+   **Darktable XMP sidecars.** If a tag prefix is configured (see
+   below), every photo also gets a `<filename>.xmp` sidecar with
+   Project/Location/Name (and any `extra` fields) written as Darktable
+   hierarchical tags under that prefix — e.g. `PricePixel|Project|...`,
+   `PricePixel|Location|...`. This mirrors the two XMP fields Darktable
+   itself writes for hierarchical tags (confirmed against a real
+   Darktable-generated sidecar): `dc:subject` (a flat, deduplicated set
+   of every tag-tree segment) and `lr:hierarchicalSubject` (the actual
+   pipe-joined paths). ID and `timestamp_utc` are deliberately *not*
+   tagged — they're bookkeeping, not something you'd browse photos by —
+   but both are still in `metadata.yaml`. No `darktable:*` processing-
+   history fields are written, since these sidecars are for photos
+   Darktable has never seen; this relies on Darktable's import reading
+   foreign/minimal XMP for metadata the same way it does for e.g.
+   Lightroom-originated sidecars (no edit history, since there isn't
+   any) — **verify this against a real Darktable import** before
+   relying on it, since it isn't something testable without a running
+   Darktable instance.
+
+   The tag prefix resolves, in order: `--tag-prefix <value>` >
+   `--config <path>` (a TOML file with just `tag_prefix = "..."`; a
+   path given explicitly this way is a hard error if missing/invalid)
+   > the default config file at `~/.config/photo-splitter/config.toml`
+   (silently skipped if absent — no prefix configured means no XMP
+   sidecars are written at all, everything else works the same).
+3. **`darktable-export`** — still a stub; its originally-planned job
+   (produce XMP sidecars) is now handled by `photo-splitter` directly
+   (see above). Whether a separate import step is still needed at all
+   depends on whether Darktable's plain import (reading those sidecars'
+   tags, with no special handling) is sufficient — if so, this crate
+   may turn out to be unnecessary. The one thing a bare import can't do
+   is grouping (Darktable's `group_id` is a `library.db`-only concept,
+   not something storable in a portable sidecar — see
+   [`darktable-import-xmp`](../darktable-import-xmp), which already
+   writes `group_id` directly, for how that would be done if it turns
+   out to matter). 🚧 undecided.
 
 ## Configurable metadata
 

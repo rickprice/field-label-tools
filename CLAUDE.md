@@ -52,7 +52,33 @@ photo-splitter/     scans a directory of time-ordered photos (EXIF
                     the grouping loop -- grouping itself must stay
                     strictly sequential (it depends on seeing markers in
                     time order), so it's cheap pure bookkeeping once
-                    `decoded` already holds every file's result.
+                    `decoded` already holds every file's result. If a
+                    tag prefix resolves (xmp::resolve_tag_prefix), every
+                    moved file also gets a <file>.xmp sidecar
+                    (xmp::write_xmp_sidecar) written right after its
+                    fs::rename, inside the same per-member loop in
+                    finish_group.
+  src/xmp.rs         Config loading (tag_prefix, from --tag-prefix /
+                    --config / ~/.config/photo-splitter/config.toml,
+                    in that precedence) and XMP sidecar generation.
+                    Darktable hierarchical tags need TWO xmp fields
+                    together -- confirmed against a real
+                    Darktable-written sidecar, not guessed: dc:subject
+                    (flat_tags -- every unique path *segment* across all
+                    tags, deduplicated) and lr:hierarchicalSubject
+                    (hierarchical_tags -- the actual pipe-joined
+                    "prefix|Field|value" paths). ID and timestamp_utc
+                    are deliberately not tagged (bookkeeping, not
+                    something you'd browse by; still in metadata.yaml).
+                    Writes no darktable:* processing-history attributes
+                    at all, since these sidecars are for photos
+                    Darktable has never seen -- this assumes Darktable's
+                    import reads foreign/minimal XMP for metadata the
+                    way it does for e.g. Lightroom sidecars, which
+                    hasn't been confirmed against a real Darktable
+                    import (no Darktable instance available to test
+                    with here), only against the on-disk XMP format
+                    itself.
   src/raw_decode.rs  Two ways to get a grayscale image out of a RAW file
                     to scan for a QR code. `decode_default` (the
                     default) runs LibRaw's dcraw_process pipeline with
@@ -77,12 +103,32 @@ photo-splitter/     scans a directory of time-ordered photos (EXIF
                     published LibRaw Rust bindings were unsuitable --
                     checked 2026-11-26, worth re-checking if revisiting
                     this).
-darktable-export/   not yet implemented. Will convert those split
-                    directories into XMP sidecars for the sibling
-                    `darktable-import-xmp` repo to pick up — this crate
+darktable-export/   not yet implemented, and its originally-planned job
+                    (produce XMP sidecars) has been absorbed into
+                    photo-splitter itself (see above) -- this crate's
+                    remaining purpose, if any, is undecided. It still
                     should not talk to Darktable's SQLite database
-                    directly, that's already handled there.
+                    directly if it ends up doing anything; that's
+                    `darktable-import-xmp`'s job (group_id especially --
+                    see "Grouping is library.db-only" below).
 ```
+
+## Grouping is library.db-only, not something a sidecar can carry
+
+Confirmed via a still-open darktable issue (#16827) asking for exactly
+this feature: Darktable's image grouping (`group_id`, where an image is
+a group's representative iff `id == group_id`) lives only in
+`library.db` -- rebuilding the library from XMP loses all manually-made
+groups, because there's no stable way to encode "these N images are one
+group" in a single image's own sidecar file. (A community Lua script,
+`group_persistence`, works around this with specially-named tags, but
+only while that exact script is installed/running in Darktable --
+not something to build a tool's compatibility around.) If
+`photo-splitter`'s output ever needs grouping in Darktable, the
+reliable path is extending `darktable-import-xmp` to set `group_id`
+directly when importing (it already sets `group_id = own id` for every
+image today, i.e. explicitly ungrouped) -- not trying to encode it into
+`xmp.rs`'s sidecars.
 
 ## The QR payload is JSON, not the dash-joined string
 
@@ -117,6 +163,16 @@ whenever it was last edited.
 - `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D
   warnings`, and `cargo test` must all pass before committing. CI
   enforces the same three.
+- `xmp.rs`'s two-field hierarchical-tag structure (`dc:subject` +
+  `lr:hierarchicalSubject`) isn't from Darktable's docs -- it's reverse
+  engineered from a real Darktable-written sidecar the user pointed at
+  directly (`~/Documents/Personal/Dropbox/Pictures/CanonRawPhotos/.../
+  *.xmp`, a Dropbox sync mount -- keep any future look there to a
+  single targeted file read, not a recursive grep/glob, it can be slow
+  to materialize files). If revisiting this format, prefer checking
+  another real sidecar over trusting written docs on the subject; the
+  two don't agree on everything (e.g. docs suggested dc:subject might
+  hold full hierarchical paths -- it doesn't, just flat segments).
 - The same-day ID-disambiguation path (`group_dir`'s
   `disambiguate_with_id`) isn't just defensive coding -- it was added
   after hitting the exact collision for real during the first proper
