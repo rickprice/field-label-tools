@@ -189,6 +189,17 @@ fn decode_qr(path: &Path, fast: bool) -> Option<LabelPayload> {
     let gray = load_grayscale_for_qr(path, fast)?;
     dump_qr_debug_image(path, &gray);
 
+    // A light blur before detection dramatically cuts rqrr's candidate-match
+    // cost on noisy/high-ISO photos: fine-grained sensor noise (especially
+    // in dark, near-black frames) creates huge numbers of spurious
+    // finder-pattern-like transitions for rqrr to individually check and
+    // reject, while a real QR's large, high-contrast, structured pattern
+    // survives a mild blur without issue. Confirmed against a real
+    // pathological file (a near-black, high-ISO 12800 shot): detection went
+    // from 90+ seconds to ~150ms, with no change in detection results
+    // across 21 real test photos (same groups found, same markers).
+    let gray = image::imageops::blur(&gray, 1.0);
+
     let mut prepared = rqrr::PreparedImage::prepare(gray);
     for grid in prepared.detect_grids() {
         let Ok((_, content)) = grid.decode() else {
@@ -375,6 +386,54 @@ mod tests {
             extra: BTreeMap::new(),
         };
         assert_eq!(folder_name(&label), "P1-North Ridge-3-overview");
+    }
+
+    // ── real-camera fixtures (tests/fixtures/) ────────────────────────────
+    //
+    // Two files from an actual Canon EOS 5D Mark IV, kept deliberately
+    // minimal and privacy-reviewed before committing:
+    //   - near-black-no-marker.CR2: a genuine RAW file, confirmed to have no
+    //     identifiable content (a near-black closet shot), used to regression
+    //     -test both correctness (no marker) and the half_size+blur speed fix
+    //     -- this exact file took 90+ seconds to decode before the blur was
+    //     added (see decode_qr's comment), because its heavy ISO-12800 sensor
+    //     noise produced huge numbers of spurious QR-candidate matches.
+    //   - real-camera-marker.jpg: a genuine label-qr-gui QR code, as actually
+    //     photographed and demosaiced, cropped down to just the QR + monitor
+    //     bezel (desk/screen content removed) -- gives real-world lens
+    //     distortion/lighting/JPEG-artifact coverage a synthetically
+    //     rendered QR (see make_qr_jpeg below) doesn't.
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures")).join(name)
+    }
+
+    #[test]
+    fn decode_qr_on_real_near_black_raw_finds_no_marker_quickly() {
+        let path = fixture_path("near-black-no-marker.CR2");
+        let start = std::time::Instant::now();
+        let result = decode_qr(&path, false);
+        let elapsed = start.elapsed();
+
+        assert_eq!(result, None);
+        assert!(
+            elapsed < std::time::Duration::from_secs(15),
+            "decode took {elapsed:?}, expected well under 15s -- the whole point of \
+             this fixture is to catch a regression back to the 90+s this used to take"
+        );
+    }
+
+    #[test]
+    fn decode_qr_reads_a_real_camera_captured_marker() {
+        let path = fixture_path("real-camera-marker.jpg");
+        let label = decode_qr(&path, false).expect("real camera marker must decode");
+
+        assert_eq!(label.project, "Test QR Code generation");
+        assert_eq!(label.location, "Home Office");
+        assert_eq!(label.id, 1);
+        assert_eq!(label.name, "Testing");
+        assert_eq!(label.timestamp_utc, "2026-11-26T02:09:58Z");
+        assert!(label.extra.is_empty());
     }
 
     // ── decode_qr end-to-end against a real generated QR+JPEG ────────────

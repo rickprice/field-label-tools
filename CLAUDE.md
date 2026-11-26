@@ -113,16 +113,21 @@ whenever it was last edited.
   across filesystem boundaries. The destination folders are always
   created as siblings inside the same directory being scanned, so this
   is a non-issue unless that assumption changes.
-- There's no real camera RAW fixture in this repo to test
-  `raw_decode::decode_default` against (and hand-crafting one isn't
-  realistic), so its tests only cover the FFI plumbing itself
-  (init/close lifecycle, graceful failure on a bad path/garbage file)
-  -- not that the full dcraw_process pipeline actually produces a
-  usable image from a real camera file. This was validated manually
-  against 21 real Canon CR2 files on 2026-11-26 (see below); before
-  trusting `photo-splitter` on a real shoot with a *new* camera, repeat
-  that kind of check -- run with `--dry-run` and `RUST_LOG=debug`
-  against a handful of real RAW files first.
+- `photo-splitter/tests/fixtures/` holds two real-camera files (Canon
+  EOS 5D Mark IV, privacy-reviewed before committing -- see the comment
+  above `fixture_path()` in main.rs's test module for what each one is
+  and why): `near-black-no-marker.CR2` (a genuine RAW decode + the
+  half_size+blur speed fix, regression-tested with a 15s time bound)
+  and `real-camera-marker.jpg` (a real photographed-and-cropped QR,
+  giving lens/lighting/JPEG-artifact coverage a synthetically rendered
+  QR doesn't). Only these two, not the full 21-file set used to find
+  and fix the issues below -- keep it that way; more fixtures means
+  more repo weight (no Git LFS here) and more real-photo content
+  permanently in git history, both deliberately kept minimal. Before
+  trusting `photo-splitter` on a real shoot with a *new* camera,
+  though, still repeat that kind of manual check against a handful of
+  its actual RAW files -- these two fixtures don't cover every
+  camera/sensor's quirks.
 - **libraw_r links libgomp (OpenMP).** Combining rayon's per-file
   parallelism with LibRaw's own internal OpenMP parallelism
   oversubscribes badly -- confirmed in practice: 12 rayon workers each
@@ -142,15 +147,36 @@ whenever it was last edited.
   (sum of utime+stime across threads) vs wall-clock elapsed as the
   simplest way to confirm whether real parallelism is happening at
   all, before assuming code is at fault.
-- Individual RAW files can take drastically longer than others to
-  decode via LibRaw for reasons unrelated to file size (observed: one
-  36MB file took 10+ minutes alone while twenty 36-44MB files from the
-  same camera, same session, each took 5-22 seconds). In a
-  parallel batch this shows up as a single straggler dominating the
-  tail -- don't mistake it for a parallelism bug before checking
-  whether it's actually just one or two outlier files (e.g. instrument
-  per-file start/end timestamps temporarily, as was done to diagnose
-  this on 2026-11-26) rather than assuming the whole batch is slow.
+- A single file can make the whole batch look broken even when
+  parallelism is working correctly -- observed: one 36MB file took
+  10+ minutes alone while twenty 36-44MB files from the same camera,
+  same session, each took 5-22 seconds, dominating a parallel batch's
+  tail. **Root cause, confirmed by per-stage timing (2026-11-26): not
+  LibRaw.** All four libraw_* calls (open_file/unpack/dcraw_process/
+  make_mem_image) finished in ~1.3s combined even on the slow file --
+  the cost was entirely in `rqrr::detect_grids()` afterward. The file
+  was a near-black, ISO-12800 shot (ended up being this repo's
+  `near-black-no-marker.CR2` fixture); heavy sensor noise in a dark
+  frame creates huge numbers of spurious finder-pattern-like
+  candidates for rqrr to individually check and reject, where a
+  cleaner or brighter frame doesn't. **Fix:** `decode_qr` now runs
+  `image::imageops::blur(&gray, 1.0)` immediately before
+  `rqrr::PreparedImage::prepare` -- real QR patterns (large,
+  high-contrast, structured) survive a mild blur fine, fine-grained
+  noise doesn't. This took that file from 90+s to ~150ms with no
+  change in detection results across all 21 real test photos.
+  Tried first and rejected: `half_size` downscaling further (real risk
+  -- these photos frame the whole desk, not a tight crop of the QR, so
+  the QR's pixel margin isn't huge to begin with; shrinking it further
+  risks reintroducing the exact too-small-to-read failure the
+  EXIF-thumbnail path already has) and LibRaw's own `fbdd_noiserd`
+  pre-demosaic denoise (tested at the max setting, zero measurable
+  effect on this file -- whatever rqrr is reacting to isn't fixed by
+  denoising the Bayer data pre-demosaic). If a future pathological file
+  isn't fixed by the existing blur, re-run the same per-stage timing
+  method before guessing: it's what found the real bottleneck here
+  after an initial wrong guess (busy/detailed scene content) that
+  didn't hold up.
 - `RUST_LOG=trace` makes `decode_qr` dump the exact grayscale image it
   fed to `rqrr` into a `_qr_debug/` folder next to each source photo
   (`dump_qr_debug_image`/`write_qr_debug_image`), for diagnosing why a

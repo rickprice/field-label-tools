@@ -41,10 +41,12 @@ afterward.
    bright/contrasty enough to find the QR regardless of the as-shot
    exposure. Files are decoded in parallel across all available CPU
    cores (`rayon`); real-world testing against 21 Canon CR2 files
-   (~40MB each) found the whole batch decodes in well under a minute
-   on a 12-core machine, with occasional per-file outliers (LibRaw
-   taking disproportionately long on a specific image for reasons
-   unrelated to file size) determining the tail. Pass `--fast` to scan
+   (~40MB each) found the whole batch decodes in well under 15 seconds
+   on a 12-core machine. Before detection, the image is given a light
+   blur — a dark, high-ISO photo's sensor noise can otherwise produce
+   huge numbers of spurious QR-candidate matches (one real test file
+   went from 90+ seconds to ~150ms once this was added, with no change
+   in which markers were found). Pass `--fast` to scan
    the EXIF thumbnail instead (much faster, but thumbnails are often
    small — commonly ~160×120, sometimes framing far too little of the
    scene to resolve the QR even at that resolution — and some cameras
