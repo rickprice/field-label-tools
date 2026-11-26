@@ -45,6 +45,13 @@ afterward.
    first and check the log output (`RUST_LOG=debug` for more detail)
    before trusting either mode on a real shoot, especially the first
    time with a new camera.
+
+   To see *why* a particular marker frame wasn't recognized, run with
+   `RUST_LOG=trace`: every photo's exact QR-scan image (the LibRaw
+   output, EXIF thumbnail, or plain decoded raster, whichever applies)
+   is saved into a `_qr_debug/` folder next to it, named
+   `<original filename>.jpg`. This writes one JPEG per photo, so it's
+   gated behind `trace` rather than `debug`.
 3. **`darktable-export`** — a CLI that converts those split, tagged
    directories into XMP sidecars. 🚧 planned. This is expected to feed
    into the existing

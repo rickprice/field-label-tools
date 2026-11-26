@@ -177,6 +177,8 @@ fn read_exif(path: &Path) -> Option<exif::Exif> {
 
 fn decode_qr(path: &Path, fast: bool) -> Option<LabelPayload> {
     let gray = load_grayscale_for_qr(path, fast)?;
+    dump_qr_debug_image(path, &gray);
+
     let mut prepared = rqrr::PreparedImage::prepare(gray);
     for grid in prepared.detect_grids() {
         let Ok((_, content)) = grid.decode() else {
@@ -191,6 +193,44 @@ fn decode_qr(path: &Path, fast: bool) -> Option<LabelPayload> {
         }
     }
     None
+}
+
+/// With `RUST_LOG=trace`, save the exact image handed to the QR detector
+/// for each photo into a `_qr_debug/` folder next to it -- useful for
+/// seeing *why* a marker frame wasn't found (e.g. a RAW thumbnail too dark
+/// or small to read, or a libraw decode that came out looking wrong).
+/// Gated behind trace rather than debug since, unlike a log line, this
+/// writes a file per photo.
+fn dump_qr_debug_image(path: &Path, image: &image::GrayImage) {
+    if !log::log_enabled!(log::Level::Trace) {
+        return;
+    }
+    match write_qr_debug_image(path, image) {
+        Ok(dump_path) => log::trace!(
+            "{}: wrote the image scanned for a QR code to {}",
+            path.display(),
+            dump_path.display()
+        ),
+        Err(err) => log::debug!("{}: could not write QR debug dump: {err}", path.display()),
+    }
+}
+
+fn write_qr_debug_image(path: &Path, image: &image::GrayImage) -> Result<PathBuf> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    let file_name = path
+        .file_name()
+        .with_context(|| format!("{} has no file name", path.display()))?;
+
+    let debug_dir = parent.join("_qr_debug");
+    fs::create_dir_all(&debug_dir).with_context(|| format!("creating {}", debug_dir.display()))?;
+
+    let dump_path = debug_dir.join(format!("{}.jpg", file_name.to_string_lossy()));
+    image
+        .save(&dump_path)
+        .with_context(|| format!("writing {}", dump_path.display()))?;
+    Ok(dump_path)
 }
 
 fn load_grayscale_for_qr(path: &Path, fast: bool) -> Option<image::GrayImage> {
@@ -369,6 +409,35 @@ mod tests {
         image.save(&path).unwrap();
 
         assert_eq!(decode_qr(&path, false), None);
+    }
+
+    // ── QR debug dump ────────────────────────────────────────────────────
+
+    #[test]
+    fn write_qr_debug_image_writes_into_a_sibling_qr_debug_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("IMG_0001.CR2");
+        fs::write(&path, b"not a real raw file").unwrap();
+        let image = image::GrayImage::new(8, 8);
+
+        let dump_path = write_qr_debug_image(&path, &image).unwrap();
+
+        assert_eq!(
+            dump_path,
+            dir.path().join("_qr_debug").join("IMG_0001.CR2.jpg")
+        );
+        assert!(dump_path.is_file());
+    }
+
+    #[test]
+    fn write_qr_debug_image_reuses_an_existing_qr_debug_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("_qr_debug")).unwrap();
+        let path = dir.path().join("IMG_0002.CR2");
+        fs::write(&path, b"not a real raw file").unwrap();
+        let image = image::GrayImage::new(8, 8);
+
+        assert!(write_qr_debug_image(&path, &image).is_ok());
     }
 
     // ── grouping/moving ────────────────────────────────────────────────────
