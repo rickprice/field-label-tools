@@ -18,9 +18,27 @@ afterward.
    fields, under `"extra"`. ✅ implemented.
 2. **`photo-splitter`** — a CLI that walks a directory of time-ordered
    photos, treats each QR-code frame as the start of a new group, and
-   splits everything up to the next QR frame into
-   `<Project>-<Location>-<ID>-<Name>/`, writing a YAML metadata file
-   inside each folder. 🚧 planned.
+   moves everything up to the next QR frame into
+   `<Project>-<Location>-<ID>-<Name>/`, writing a `metadata.yaml` file
+   (the decoded QR payload verbatim) inside each folder. Photos are
+   ordered by EXIF `DateTimeOriginal` (falling back to file mtime), and
+   each group is only moved once its boundary is known — i.e. once the
+   next marker (or the end of the directory) is found — so an
+   interrupted run never leaves a group half-moved. Any files before
+   the first marker are left in place with a warning rather than
+   guessed at. ✅ implemented.
+
+   RAW files (CR2/NEF/ARW/DNG/ORF/PEF, matching `darktable-import-xmp`'s
+   supported list) are the primary target; JPEG/PNG/TIFF/BMP/WebP are
+   also supported. For RAW files, the QR is scanned from the
+   EXIF-embedded thumbnail rather than the full RAW data (there's no
+   cheap way to decode that directly) — label-qr-gui's QR is
+   deliberately huge and high-contrast so it should survive being
+   shrunk to thumbnail size, but if your camera's thumbnail turns out
+   too small (or absent), that marker frame will be missed and merged
+   into the previous group. Run with `--dry-run` first and check the
+   log output (`RUST_LOG=debug` for more detail) before trusting it on
+   a real shoot, especially the first time with a new camera.
 3. **`darktable-export`** — a CLI that converts those split, tagged
    directories into XMP sidecars. 🚧 planned. This is expected to feed
    into the existing
@@ -58,15 +76,16 @@ precision) — the time the QR was last redrawn, not shown on the form
 itself. The app forces a repaint at least once a second so this stays
 current even if the form sits idle before the screen is photographed.
 
-`photo-splitter` will need to treat `"extra"` as an open map (field
-names it's never seen are still valid) rather than a fixed schema,
-since the set of extra fields varies per project/config file.
+`photo-splitter` treats `"extra"` as an open map (field names it's
+never seen are still valid) rather than a fixed schema, since the set
+of extra fields varies per project/config file, and writes it into
+`metadata.yaml` verbatim.
 
 ## Project layout
 
 ```
 label-qr-gui/      GUI appliance (egui/eframe) — crate implemented
-photo-splitter/    CLI — stub only, not yet implemented
+photo-splitter/    CLI — crate implemented
 darktable-export/  CLI — stub only, not yet implemented
 ```
 
