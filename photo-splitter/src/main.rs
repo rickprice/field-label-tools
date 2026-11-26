@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 mod libraw_sys;
 mod raw_decode;
+mod video;
 mod xmp;
 
 /// RAW extensions matching darktable-import-xmp's supported format list.
@@ -53,8 +54,9 @@ struct Args {
     #[arg(long)]
     tag_prefix: Option<String>,
 
-    /// TOML config file (`tag_prefix = "..."` and/or `default_client` /
-    /// `default_project` / `default_location` / `default_name`) to read
+    /// TOML config file (`tag_prefix = "..."`; `default_client` /
+    /// `default_project` / `default_location` / `default_name`;
+    /// `video_scan_window_secs` / `video_scan_interval_secs`) to read
     /// instead of the default config file at
     /// ~/.config/photo-splitter/config.toml. Unlike the default path, a
     /// --config path that doesn't exist or doesn't parse is a hard error,
@@ -110,6 +112,7 @@ fn run(args: &Args) -> Result<()> {
         );
     }
     let field_defaults = xmp::resolve_field_defaults(args.config.as_deref())?;
+    let video_scan_config = xmp::resolve_video_scan_config(args.config.as_deref())?;
 
     let mut entries: Vec<PathBuf> = fs::read_dir(&args.dir)
         .with_context(|| format!("reading directory {}", args.dir.display()))?
@@ -132,7 +135,7 @@ fn run(args: &Args) -> Result<()> {
     let decoded: Vec<Option<LabelPayload>> = entries
         .par_iter()
         .map(|path| {
-            decode_qr(path, args.fast).map(|mut label| {
+            decode_qr(path, args.fast, video_scan_config).map(|mut label| {
                 field_defaults.apply(&mut label);
                 label
             })
@@ -190,14 +193,21 @@ fn is_raw(path: &Path) -> bool {
 }
 
 fn is_supported(path: &Path) -> bool {
-    extension_lower(path).is_some_and(|ext| {
-        RAW_EXTENSIONS.contains(&ext.as_str()) || RASTER_EXTENSIONS.contains(&ext.as_str())
-    })
+    video::is_video(path)
+        || extension_lower(path).is_some_and(|ext| {
+            RAW_EXTENSIONS.contains(&ext.as_str()) || RASTER_EXTENSIONS.contains(&ext.as_str())
+        })
 }
 
-/// EXIF `DateTimeOriginal` when present, otherwise the file's mtime.
+/// EXIF `DateTimeOriginal` for a photo, the container's `creation_time`
+/// tag for a video (see video::creation_time), otherwise the file's mtime.
 fn captured_at(path: &Path) -> SystemTime {
-    exif_datetime_original(path).unwrap_or_else(|| {
+    let embedded = if video::is_video(path) {
+        video::creation_time(path)
+    } else {
+        exif_datetime_original(path)
+    };
+    embedded.unwrap_or_else(|| {
         fs::metadata(path)
             .and_then(|m| m.modified())
             .unwrap_or(SystemTime::UNIX_EPOCH)
@@ -225,32 +235,46 @@ fn read_exif(path: &Path) -> Option<exif::Exif> {
 
 // ── QR decoding ──────────────────────────────────────────────────────────────
 
-fn decode_qr(path: &Path, fast: bool) -> Option<LabelPayload> {
+fn decode_qr(path: &Path, fast: bool, video_scan: video::ScanConfig) -> Option<LabelPayload> {
+    if video::is_video(path) {
+        // Lazy iterator -- stops calling ffmpeg for further samples as
+        // soon as one decodes, so a real marker video (where the QR is
+        // usually found in the first sample or two) is cheap even though
+        // scanning a non-marker video all the way through isn't (see
+        // video.rs's module doc).
+        return video::frames_in_window(path, video_scan).find_map(|(offset, gray)| {
+            dump_qr_debug_image(path, &gray, Some(&format!("{}s", offset.as_secs())));
+            decode_label_from_gray(&gray, &format!("{} @ {offset:?}", path.display()))
+        });
+    }
+
     let gray = load_grayscale_for_qr(path, fast)?;
-    dump_qr_debug_image(path, &gray);
+    dump_qr_debug_image(path, &gray, None);
+    decode_label_from_gray(&gray, &path.display().to_string())
+}
 
-    // A light blur before detection dramatically cuts rqrr's candidate-match
-    // cost on noisy/high-ISO photos: fine-grained sensor noise (especially
-    // in dark, near-black frames) creates huge numbers of spurious
-    // finder-pattern-like transitions for rqrr to individually check and
-    // reject, while a real QR's large, high-contrast, structured pattern
-    // survives a mild blur without issue. Confirmed against a real
-    // pathological file (a near-black, high-ISO 12800 shot): detection went
-    // from 90+ seconds to ~150ms, with no change in detection results
-    // across 21 real test photos (same groups found, same markers).
-    let gray = image::imageops::blur(&gray, 1.0);
+/// A light blur before detection dramatically cuts rqrr's candidate-match
+/// cost on noisy/high-ISO photos: fine-grained sensor noise (especially
+/// in dark, near-black frames) creates huge numbers of spurious
+/// finder-pattern-like transitions for rqrr to individually check and
+/// reject, while a real QR's large, high-contrast, structured pattern
+/// survives a mild blur without issue. Confirmed against a real
+/// pathological file (a near-black, high-ISO 12800 shot): detection went
+/// from 90+ seconds to ~150ms, with no change in detection results
+/// across 21 real test photos (same groups found, same markers).
+fn decode_label_from_gray(gray: &image::GrayImage, context: &str) -> Option<LabelPayload> {
+    let blurred = image::imageops::blur(gray, 1.0);
 
-    let mut prepared = rqrr::PreparedImage::prepare(gray);
+    let mut prepared = rqrr::PreparedImage::prepare(blurred);
     for grid in prepared.detect_grids() {
         let Ok((_, content)) = grid.decode() else {
             continue;
         };
         match serde_json::from_str::<LabelPayload>(&content) {
             Ok(label) => return Some(label),
-            Err(err) => log::debug!(
-                "{}: found a QR code but it isn't a label payload ({err})",
-                path.display()
-            ),
+            Err(err) => {
+                log::debug!("{context}: found a QR code but it isn't a label payload ({err})")
+            }
         }
     }
     None
@@ -262,11 +286,11 @@ fn decode_qr(path: &Path, fast: bool) -> Option<LabelPayload> {
 /// or small to read, or a libraw decode that came out looking wrong).
 /// Gated behind trace rather than debug since, unlike a log line, this
 /// writes a file per photo.
-fn dump_qr_debug_image(path: &Path, image: &image::GrayImage) {
+fn dump_qr_debug_image(path: &Path, image: &image::GrayImage, frame_suffix: Option<&str>) {
     if !log::log_enabled!(log::Level::Trace) {
         return;
     }
-    match write_qr_debug_image(path, image) {
+    match write_qr_debug_image(path, image, frame_suffix) {
         Ok(dump_path) => log::trace!(
             "{}: wrote the image scanned for a QR code to {}",
             path.display(),
@@ -276,7 +300,15 @@ fn dump_qr_debug_image(path: &Path, image: &image::GrayImage) {
     }
 }
 
-fn write_qr_debug_image(path: &Path, image: &image::GrayImage) -> Result<PathBuf> {
+/// `frame_suffix` distinguishes multiple sampled frames from the same
+/// video file (e.g. `Some("10s")`), which would otherwise all collide on
+/// the same dump path and overwrite each other -- `None` for a photo,
+/// which only ever has the one image to dump.
+fn write_qr_debug_image(
+    path: &Path,
+    image: &image::GrayImage,
+    frame_suffix: Option<&str>,
+) -> Result<PathBuf> {
     let parent = path
         .parent()
         .with_context(|| format!("{} has no parent directory", path.display()))?;
@@ -287,7 +319,12 @@ fn write_qr_debug_image(path: &Path, image: &image::GrayImage) -> Result<PathBuf
     let debug_dir = parent.join("_qr_debug");
     fs::create_dir_all(&debug_dir).with_context(|| format!("creating {}", debug_dir.display()))?;
 
-    let dump_path = debug_dir.join(format!("{}.jpg", file_name.to_string_lossy()));
+    let file_name = file_name.to_string_lossy();
+    let dump_name = match frame_suffix {
+        Some(suffix) => format!("{file_name}.{suffix}.jpg"),
+        None => format!("{file_name}.jpg"),
+    };
+    let dump_path = debug_dir.join(dump_name);
     image
         .save(&dump_path)
         .with_context(|| format!("writing {}", dump_path.display()))?;
@@ -540,7 +577,7 @@ mod tests {
         let path = fixture_path("near-black-no-marker.CR2");
         skip_if_fixture_missing!(path);
         let start = std::time::Instant::now();
-        let result = decode_qr(&path, false);
+        let result = decode_qr(&path, false, video::ScanConfig::default());
         let elapsed = start.elapsed();
 
         assert_eq!(result, None);
@@ -555,7 +592,8 @@ mod tests {
     fn decode_qr_reads_a_real_camera_captured_marker() {
         let path = fixture_path("real-camera-marker.jpg");
         skip_if_fixture_missing!(path);
-        let label = decode_qr(&path, false).expect("real camera marker must decode");
+        let label = decode_qr(&path, false, video::ScanConfig::default())
+            .expect("real camera marker must decode");
 
         assert_eq!(label.project, "Test QR Code generation");
         assert_eq!(label.location, "Home Office");
@@ -597,7 +635,10 @@ mod tests {
         let path = dir.path().join("marker.jpg");
         fs::write(&path, make_qr_jpeg(&label)).unwrap();
 
-        assert_eq!(decode_qr(&path, false), Some(label));
+        assert_eq!(
+            decode_qr(&path, false, video::ScanConfig::default()),
+            Some(label)
+        );
     }
 
     #[test]
@@ -607,7 +648,160 @@ mod tests {
         let image = image::RgbImage::new(64, 64);
         image.save(&path).unwrap();
 
-        assert_eq!(decode_qr(&path, false), None);
+        assert_eq!(decode_qr(&path, false, video::ScanConfig::default()), None);
+    }
+
+    // ── video marker decoding ──────────────────────────────────────────────
+    //
+    // Needs real ffmpeg/ffprobe binaries on PATH (the Nix dev shell and CI
+    // both provide these) -- skip gracefully rather than fail if they're
+    // not available, same spirit as skip_if_fixture_missing! above.
+
+    fn ffmpeg_available() -> bool {
+        std::process::Command::new("ffmpeg")
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    macro_rules! skip_if_ffmpeg_missing {
+        () => {
+            if !ffmpeg_available() {
+                eprintln!("skipping: ffmpeg not found on PATH");
+                return;
+            }
+        };
+    }
+
+    /// Builds `out_path` by concatenating `frames` back-to-back via
+    /// ffmpeg's concat filter -- `None` is a solid black segment, `Some`
+    /// is a still JPEG held for that many seconds. Used to construct a
+    /// clip where a QR marker frame only appears partway through, not at
+    /// offset zero.
+    fn make_test_video(out_path: &Path, frames: &[(Option<&[u8]>, u32)]) {
+        let dir = out_path.parent().unwrap();
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.args(["-y", "-v", "error"]);
+
+        for (i, (content, seconds)) in frames.iter().enumerate() {
+            match content {
+                None => {
+                    cmd.args([
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        &format!("color=c=black:s=400x400:d={seconds}"),
+                    ]);
+                }
+                Some(bytes) => {
+                    let frame_path = dir.join(format!("frame_{i}.jpg"));
+                    fs::write(&frame_path, bytes).unwrap();
+                    cmd.args(["-loop", "1", "-t", &seconds.to_string(), "-i"]);
+                    cmd.arg(&frame_path);
+                }
+            }
+        }
+
+        let filter = (0..frames.len())
+            // The QR JPEG's actual size isn't exactly 800x800 (qrcode's
+            // min_dimensions rounds up to fit whole modules, e.g. 414x414
+            // for some payloads), so force every segment to a common
+            // resolution before concat -- it refuses to join segments of
+            // different sizes. flags=neighbor (nearest-neighbor, not the
+            // default bilinear) matters here: a QR's hard module edges
+            // need to stay crisp, not get blurred across a boundary that
+            // no longer lines up pixel-for-pixel after an arbitrary
+            // resize -- confirmed by hand (2026-11-26): the default
+            // bilinear scale from 414x414 down to 400x400 blurred this
+            // exact test payload's QR just enough that rqrr failed to
+            // detect it at all, despite looking fine to the eye.
+            .map(|i| format!("[{i}:v]scale=800:800:flags=neighbor,format=yuv420p[v{i}]"))
+            .chain(std::iter::once(format!(
+                "{}concat=n={}:v=1:a=0[v]",
+                (0..frames.len())
+                    .map(|i| format!("[v{i}]"))
+                    .collect::<String>(),
+                frames.len()
+            )))
+            .collect::<Vec<_>>()
+            .join(";");
+        cmd.args(["-filter_complex", &filter, "-map", "[v]", "-r", "2"]);
+        cmd.arg(out_path);
+
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "ffmpeg failed to build the test video: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn decode_qr_finds_a_marker_video_whose_qr_frame_is_the_only_content() {
+        skip_if_ffmpeg_missing!();
+
+        let dir = tempfile::tempdir().unwrap();
+        let label = sample_label();
+        let qr_jpeg = make_qr_jpeg(&label);
+
+        let video_path = dir.path().join("marker.mp4");
+        make_test_video(&video_path, &[(Some(&qr_jpeg), 2)]);
+
+        assert_eq!(
+            decode_qr(&video_path, false, video::ScanConfig::default()),
+            Some(label)
+        );
+    }
+
+    #[test]
+    fn decode_qr_finds_a_marker_video_whose_qr_frame_appears_partway_through() {
+        skip_if_ffmpeg_missing!();
+
+        let dir = tempfile::tempdir().unwrap();
+        let label = sample_label();
+        let qr_jpeg = make_qr_jpeg(&label);
+
+        // 12s of black, then the QR for 6s. Sampling the real 5-minute/
+        // 5-second-interval default would make this test itself take
+        // minutes, so exercise a short ScanConfig directly instead of
+        // going through decode_qr's production defaults.
+        let video_path = dir.path().join("marker.mp4");
+        make_test_video(&video_path, &[(None, 12), (Some(&qr_jpeg), 6)]);
+
+        let scan_config = video::ScanConfig {
+            window: std::time::Duration::from_secs(20),
+            interval: std::time::Duration::from_secs(5),
+        };
+        let found = video::frames_in_window(&video_path, scan_config).find_map(|(offset, gray)| {
+            decode_label_from_gray(&gray, &format!("{offset:?}")).map(|found| (offset, found))
+        });
+
+        let (offset, found_label) = found.expect("QR must be found somewhere in the window");
+        assert_eq!(found_label, label);
+        assert!(
+            offset >= std::time::Duration::from_secs(12),
+            "the QR shouldn't be found before it actually appears in the clip (at 12s), \
+             was found at {offset:?}"
+        );
+    }
+
+    #[test]
+    fn frames_in_window_finds_nothing_in_a_video_with_no_marker() {
+        skip_if_ffmpeg_missing!();
+
+        let dir = tempfile::tempdir().unwrap();
+        let video_path = dir.path().join("plain.mp4");
+        make_test_video(&video_path, &[(None, 6)]);
+
+        let scan_config = video::ScanConfig {
+            window: std::time::Duration::from_secs(10),
+            interval: std::time::Duration::from_secs(5),
+        };
+        let found = video::frames_in_window(&video_path, scan_config)
+            .find_map(|(_, gray)| decode_label_from_gray(&gray, "test"));
+        assert_eq!(found, None);
     }
 
     // ── QR debug dump ────────────────────────────────────────────────────
@@ -619,7 +813,7 @@ mod tests {
         fs::write(&path, b"not a real raw file").unwrap();
         let image = image::GrayImage::new(8, 8);
 
-        let dump_path = write_qr_debug_image(&path, &image).unwrap();
+        let dump_path = write_qr_debug_image(&path, &image, None).unwrap();
 
         assert_eq!(
             dump_path,
@@ -636,7 +830,22 @@ mod tests {
         fs::write(&path, b"not a real raw file").unwrap();
         let image = image::GrayImage::new(8, 8);
 
-        assert!(write_qr_debug_image(&path, &image).is_ok());
+        assert!(write_qr_debug_image(&path, &image, None).is_ok());
+    }
+
+    #[test]
+    fn write_qr_debug_image_distinguishes_video_frames_by_suffix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.mp4");
+        fs::write(&path, b"not a real video file").unwrap();
+        let image = image::GrayImage::new(8, 8);
+
+        let dump_path = write_qr_debug_image(&path, &image, Some("10s")).unwrap();
+
+        assert_eq!(
+            dump_path,
+            dir.path().join("_qr_debug").join("clip.mp4.10s.jpg")
+        );
     }
 
     // ── grouping/moving ────────────────────────────────────────────────────

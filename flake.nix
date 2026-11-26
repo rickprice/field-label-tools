@@ -82,9 +82,17 @@
             # cross-file parallelism as the only parallelism layer.
             # --set-default so an explicit OMP_NUM_THREADS in the caller's
             # environment still wins.
+            #
+            # ffmpeg-headless (video.rs) is a *runtime* dependency, not a
+            # build-time one -- it's shelled out to, never linked against
+            # -- so it's put on PATH here rather than in buildInputs.
+            # -headless specifically to skip the GUI/X11/Qt dependencies
+            # the full ffmpeg package pulls in, which this CLI tool never
+            # uses.
             postFixup = ''
               wrapProgram $out/bin/photo-splitter \
-                --set-default OMP_NUM_THREADS 1
+                --set-default OMP_NUM_THREADS 1 \
+                --prefix PATH : "${pkgs.lib.makeBinPath [ pkgs.ffmpeg-headless ]}"
             '';
             meta = with pkgs.lib; {
               description = "Splits a directory of time-ordered photos into per-shoot folders using QR-code marker frames";
@@ -112,6 +120,7 @@
               rust-analyzer
               pkg-config
               rustPlatform.bindgenHook
+              ffmpeg-headless
             ];
             buildInputs = guiLibs pkgs ++ [ pkgs.libraw ];
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (guiLibs pkgs);

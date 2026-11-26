@@ -17,7 +17,7 @@ jobs:
       - name: install GUI and photo-splitter build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libraw-dev libclang-dev
+          sudo apt-get install -y libxkbcommon-dev libwayland-dev libgl1-mesa-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libraw-dev libclang-dev ffmpeg
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy

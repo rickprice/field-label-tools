@@ -22,11 +22,13 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::LabelPayload;
+use crate::video;
 
 #[derive(Deserialize, Default)]
 struct ConfigFile {
@@ -35,6 +37,24 @@ struct ConfigFile {
     default_project: Option<String>,
     default_location: Option<String>,
     default_name: Option<String>,
+    video_scan_window_secs: Option<u64>,
+    video_scan_interval_secs: Option<u64>,
+}
+
+impl From<ConfigFile> for video::ScanConfig {
+    fn from(config: ConfigFile) -> Self {
+        let defaults = video::ScanConfig::default();
+        Self {
+            window: config
+                .video_scan_window_secs
+                .map(Duration::from_secs)
+                .unwrap_or(defaults.window),
+            interval: config
+                .video_scan_interval_secs
+                .map(Duration::from_secs)
+                .unwrap_or(defaults.interval),
+        }
+    }
 }
 
 /// Configured fallback values for blank Client/Project/Location/Name
@@ -87,6 +107,34 @@ fn default_config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| dir.join("photo-splitter").join("config.toml"))
 }
 
+/// Loads the config file per the shared precedence every `resolve_*`
+/// function below uses: an explicit `--config <path>` (hard error if
+/// missing/invalid, since it was asked for by name) or else the default
+/// `~/.config/photo-splitter/config.toml` (silently all-defaults if
+/// absent -- most users haven't set one up).
+fn resolve_config_file(
+    config_arg: Option<&Path>,
+    default_path: Option<PathBuf>,
+) -> Result<ConfigFile> {
+    if let Some(path) = config_arg {
+        return load_config_file(path)
+            .with_context(|| format!("loading config file {}", path.display()));
+    }
+
+    let Some(path) = default_path else {
+        return Ok(ConfigFile::default());
+    };
+    if !path.is_file() {
+        return Ok(ConfigFile::default());
+    }
+    load_config_file(&path).with_context(|| format!("loading config file {}", path.display()))
+}
+
+fn load_config_file(path: &Path) -> Result<ConfigFile> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+}
+
 /// Resolve the tag prefix to use, in order: `--tag-prefix`, then
 /// `--config <path>` (hard error if that explicit path is missing/invalid --
 /// the user asked for it specifically), then the default
@@ -108,22 +156,7 @@ fn resolve_tag_prefix_from(
     if let Some(prefix) = tag_prefix_arg {
         return Ok(Some(prefix.to_string()));
     }
-
-    if let Some(path) = config_arg {
-        let config = load_config_file(path)
-            .with_context(|| format!("loading config file {}", path.display()))?;
-        return Ok(config.tag_prefix);
-    }
-
-    let Some(path) = default_path else {
-        return Ok(None);
-    };
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let config = load_config_file(&path)
-        .with_context(|| format!("loading config file {}", path.display()))?;
-    Ok(config.tag_prefix)
+    Ok(resolve_config_file(config_arg, default_path)?.tag_prefix)
 }
 
 /// Resolve configured per-field defaults, from the same config file and
@@ -138,26 +171,22 @@ fn resolve_field_defaults_from(
     config_arg: Option<&Path>,
     default_path: Option<PathBuf>,
 ) -> Result<FieldDefaults> {
-    if let Some(path) = config_arg {
-        let config = load_config_file(path)
-            .with_context(|| format!("loading config file {}", path.display()))?;
-        return Ok(config.into());
-    }
-
-    let Some(path) = default_path else {
-        return Ok(FieldDefaults::default());
-    };
-    if !path.is_file() {
-        return Ok(FieldDefaults::default());
-    }
-    let config = load_config_file(&path)
-        .with_context(|| format!("loading config file {}", path.display()))?;
-    Ok(config.into())
+    Ok(resolve_config_file(config_arg, default_path)?.into())
 }
 
-fn load_config_file(path: &Path) -> Result<ConfigFile> {
-    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+/// Resolve the video QR-marker scan window/interval, from the same config
+/// file and precedence as `resolve_tag_prefix`. There's no CLI-flag
+/// override, same reasoning as `resolve_field_defaults` -- this is a
+/// once-per-install setting, not a per-run one.
+pub fn resolve_video_scan_config(config_arg: Option<&Path>) -> Result<video::ScanConfig> {
+    resolve_video_scan_config_from(config_arg, default_config_path())
+}
+
+fn resolve_video_scan_config_from(
+    config_arg: Option<&Path>,
+    default_path: Option<PathBuf>,
+) -> Result<video::ScanConfig> {
+    Ok(resolve_config_file(config_arg, default_path)?.into())
 }
 
 /// Hierarchical tags (`{prefix}|Client|...`, `{prefix}|Project|...`,
@@ -485,5 +514,45 @@ mod tests {
                 name: None,
             }
         );
+    }
+
+    #[test]
+    fn resolve_video_scan_config_reads_configured_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "video_scan_window_secs = 60\nvideo_scan_interval_secs = 2\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_video_scan_config(Some(&config_path)).unwrap();
+        assert_eq!(
+            resolved,
+            video::ScanConfig {
+                window: Duration::from_secs(60),
+                interval: Duration::from_secs(2),
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_video_scan_config_from_falls_back_to_defaults_when_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let default_path = dir.path().join("does-not-exist.toml");
+
+        let resolved = resolve_video_scan_config_from(None, Some(default_path)).unwrap();
+        assert_eq!(resolved, video::ScanConfig::default());
+    }
+
+    #[test]
+    fn resolve_video_scan_config_falls_back_to_default_interval_when_only_window_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(&config_path, "video_scan_window_secs = 60\n").unwrap();
+
+        let resolved = resolve_video_scan_config(Some(&config_path)).unwrap();
+        assert_eq!(resolved.window, Duration::from_secs(60));
+        assert_eq!(resolved.interval, video::ScanConfig::default().interval);
     }
 }

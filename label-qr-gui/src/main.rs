@@ -291,7 +291,7 @@ mod tests {
 
         let index = std::fs::read_to_string(dir.path().join("index.html")).unwrap();
         assert!(index.contains("<title>Field Label</title>"));
-        assert!(index.contains("DEFAULT_EXTRA_FIELDS"));
+        assert!(index.contains("DEFAULT_FIELD_SETS"));
 
         let fields = std::fs::read_to_string(dir.path().join("fields.example.json")).unwrap();
         assert!(fields.contains("Surveyor"));

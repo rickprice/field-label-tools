@@ -57,15 +57,84 @@ label-qr-gui/      egui/eframe appliance. LabelApp holds the five
                     fixture were removed afterward once confirmed, rather
                     than left in the suite (it depended on Node to
                     generate its fixture, which the Rust test suite has
-                    no other reason to require). Extra-field
-                    customization works like --config fields.toml but via
-                    a JSON sidecar (fields.example.json -> fields.json,
-                    loaded with fetch() -- falls back to the
-                    DEFAULT_EXTRA_FIELDS array hardcoded near the bottom
-                    of the file if that fetch fails, e.g. opened via
-                    file:// in a browser that blocks fetch() of local
-                    files) or by editing DEFAULT_EXTRA_FIELDS directly,
-                    which works regardless of how the file was opened.
+                    no other reason to require). Extra fields are grouped
+                    into named metadata sets (a project with more than one
+                    kind of shoot can have one field list per kind rather
+                    than a single fixed one) picked via the "Metadata Set"
+                    dropdown; customization works like --config
+                    fields.toml but via a JSON sidecar (fields.example.json
+                    -> fields.json, `{"SetName": [{name, reset_on_next},
+                    ...], ...}`, loaded with fetch() -- falls back to the
+                    DEFAULT_FIELD_SETS object hardcoded near the bottom of
+                    the file if that fetch fails, e.g. opened via file://
+                    in a browser that blocks fetch() of local files) or by
+                    editing DEFAULT_FIELD_SETS directly, which works
+                    regardless of how the file was opened.
+                    ensurePlainFieldSet() guarantees a no-extra-fields
+                    "Plain" option always exists in the dropdown even if
+                    the loaded config doesn't define one (checked
+                    case-insensitively against "Plain"/"Default", or any
+                    set that's already empty) -- there should always be a
+                    quick way to skip extra fields entirely, the same as
+                    not passing --config to label-qr-gui.
+
+                    Separately from the QR code, the page also has an
+                    SMPTE LTC ("timecode warble") generator for jam-
+                    syncing a camera/recorder's audio input, toggled by
+                    its own Start/Stop button and independent of
+                    everything else on the page (the two features don't
+                    interact). Bit-level frame format (which bits hold
+                    frame/seconds/minutes/hours BCD fields, the 16-bit
+                    sync word, biphase mark coding's transition rule)
+                    was confirmed against SMPTE 12M's published layout,
+                    not written from memory -- see the long comment
+                    directly above `LTC_WORKLET_SOURCE` for the full bit
+                    table. Drop-frame counting isn't implemented (the
+                    29.97fps option is non-drop, which drifts slowly from
+                    true wall-clock time but is simpler); user-bit/flag-
+                    bit fields are left at 0 (unused) -- this only needs
+                    to carry H:M:S:F correctly for an auto-sync tool to
+                    correlate separate recordings' audio tracks.
+
+                    Runs inside an AudioWorklet (loaded from a Blob URL,
+                    not a second file, to keep this page single-file) --
+                    a dedicated real-time-safe audio thread, chosen
+                    specifically so ordinary page activity (typing,
+                    layout, GC pauses) can never glitch the bit timing
+                    the way running this on the main thread could.
+                    Jam-syncs to the device's wall-clock time of day when
+                    "Start Timecode" is pressed, then free-runs from
+                    there using the AudioContext's own sample clock --
+                    see the module comment for why that's the realistic
+                    limit of "sync" without a hardware reference.
+
+                    Verified by two independent means (2026-11-26), since
+                    this is bit-level protocol code where a subtle error
+                    could look fine on a waveform but decode wrong: (1)
+                    ran the exact AudioWorkletProcessor source (extracted
+                    from this file) in Node by stubbing `sampleRate`/
+                    `AudioWorkletProcessor`/`registerProcessor`, driving
+                    `process()` in a loop to generate real audio, written
+                    to a WAV file; (2) decoded that WAV with an
+                    independently-written Python biphase demodulator (reads
+                    transition timings directly from the PCM samples,
+                    estimating bit-cell duration from the data itself
+                    rather than reusing any constant from the generator)
+                    -- decoded frame numbers incremented by exactly 1 and
+                    rolled over correctly (24 at 25fps, 29 at 29.97fps) at
+                    every sync-word position across all four fps options.
+                    Separately confirmed via a real headless-Chrome click
+                    on the Start Timecode button that the whole pipeline
+                    (AudioContext creation, worklet loading, message
+                    passing, readout update) wires up and produces a
+                    correctly wall-clock-jam-synced first tick --
+                    continuous real-time playback through actual audio
+                    hardware could not be verified in this sandbox (no
+                    real audio output device, so headless Chrome's audio
+                    render graph only processes an initial burst rather
+                    than pacing in real time) and is worth a quick manual
+                    check in an actual browser before relying on this for
+                    a real multi-camera shoot.
                     `label-qr-gui --export-web <DIR>` (main.rs, not part
                     of web/index.html itself) embeds both files via
                     `include_str!` and writes them out verbatim instead of

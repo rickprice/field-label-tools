@@ -1,5 +1,11 @@
-[
-  { "name": "Surveyor" },
-  { "name": "Permit Number" },
-  { "name": "Notes", "reset_on_next": true }
-]
+{
+  "Plain": [],
+  "Survey": [
+    { "name": "Surveyor" },
+    { "name": "Permit Number" }
+  ],
+  "Inspection": [
+    { "name": "Inspector" },
+    { "name": "Notes", "reset_on_next": true }
+  ]
+}

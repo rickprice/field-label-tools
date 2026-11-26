@@ -42,13 +42,16 @@
     color: #333;
   }
   input[type="text"],
-  input[type="number"] {
+  input[type="number"],
+  select {
     width: 100%;
     font-size: 1.05rem;
     padding: 8px;
     margin-top: 4px;
     border: 1px solid #bbb;
     border-radius: 4px;
+    background: #fff;
+    color: #111;
   }
   #preview {
     margin-top: 20px;
@@ -69,6 +72,36 @@
   }
   button#next:active {
     background: #000;
+  }
+  #ltc-section {
+    margin-top: 28px;
+    padding-top: 16px;
+    border-top: 2px solid #ddd;
+  }
+  button#ltc-toggle {
+    margin-top: 8px;
+    font-size: 1rem;
+    padding: 10px 20px;
+    border: 1px solid #222;
+    border-radius: 6px;
+    background: #fff;
+    color: #222;
+    cursor: pointer;
+  }
+  button#ltc-toggle.active {
+    background: #b00020;
+    border-color: #b00020;
+    color: #fff;
+  }
+  #ltc-readout {
+    margin-top: 10px;
+    font-family: ui-monospace, monospace;
+    font-size: 1.3rem;
+    letter-spacing: 0.05em;
+  }
+  #ltc-section .hint {
+    margin-top: 10px;
+    margin-bottom: 0;
   }
   #qr-pane {
     flex: 1;
@@ -117,11 +150,34 @@
     <label for="f-name">Name</label>
     <input id="f-name" type="text" autocomplete="off" />
 
+    <label for="f-fieldset">Metadata Set</label>
+    <select id="f-fieldset"></select>
+
     <div id="extra-fields"></div>
 
     <div id="preview"></div>
 
     <button id="next" type="button">Next</button>
+
+    <div id="ltc-section">
+      <label for="f-ltc-fps">Timecode Warble</label>
+      <select id="f-ltc-fps">
+        <option value="24">24 fps</option>
+        <option value="25" selected>25 fps</option>
+        <option value="29.97">29.97 fps (NDF)</option>
+        <option value="30">30 fps</option>
+      </select>
+      <button id="ltc-toggle" type="button">Start Timecode</button>
+      <div id="ltc-readout">--:--:--:--</div>
+      <div class="hint">
+        Plays a continuous SMPTE LTC audio tone (jam-synced to this
+        device's clock when started) through the audio output -- feed it
+        into a camera/recorder's mic input to help auto-sync tools (e.g.
+        DaVinci Resolve, PluralEyes) align multiple cameras/audio
+        afterward. This is independent of the QR code above; the two
+        don't need to be used together.
+      </div>
+    </div>
   </div>
 
   <div id="qr-pane">
@@ -2457,24 +2513,36 @@ qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
  * timestamp_utc reflects whenever the screen is actually photographed
  * rather than whenever a field was last edited.
  *
- * Customize extra fields (the QR payload's "extra" map) one of two ways:
- *   1. Edit DEFAULT_EXTRA_FIELDS below directly -- works with this file
+ * Extra fields (the QR payload's "extra" map) are grouped into named
+ * metadata sets, picked from the "Metadata Set" dropdown -- a project
+ * with several kinds of shoots (survey vs. inspection, say) can define
+ * one set per kind instead of one fixed field list for everything.
+ * Customize them one of two ways:
+ *   1. Edit DEFAULT_FIELD_SETS below directly -- works with this file
  *      opened standalone (e.g. copied alone onto a phone), no server
  *      needed.
  *   2. Put a fields.json sidecar file next to this HTML file (see
  *      fields.example.json) -- only takes effect when this page is
  *      fetched over http(s) (e.g. hosted on GitHub Pages), since some
  *      browsers block fetch() of local files opened via file://. If that
- *      fetch fails for any reason, DEFAULT_EXTRA_FIELDS below is used
+ *      fetch fails for any reason, DEFAULT_FIELD_SETS below is used
  *      instead, same as passing no --config to label-qr-gui.
+ * Either way, a "Plain" set (no extra fields) is always available even
+ * if it isn't explicitly listed, so there's always a no-extra-fields
+ * option -- see ensurePlainFieldSet().
  * ------------------------------------------------------------------------ */
 (function () {
   'use strict';
 
-  const DEFAULT_EXTRA_FIELDS = [
-    // { name: "Surveyor" },
-    // { name: "Notes", reset_on_next: true },
-  ];
+  const PLAIN_FIELD_SET_NAME = 'Plain';
+
+  // { "Set Name": [{ name, reset_on_next }, ...], ... } -- used verbatim
+  // as this page's field sets if no fields.json is found/fetchable.
+  const DEFAULT_FIELD_SETS = {
+    [PLAIN_FIELD_SET_NAME]: [],
+    // Survey: [{ name: "Surveyor" }, { name: "Permit Number" }],
+    // Inspection: [{ name: "Inspector" }, { name: "Notes", reset_on_next: true }],
+  };
 
   const els = {
     client: document.getElementById('f-client'),
@@ -2482,15 +2550,48 @@ qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
     location: document.getElementById('f-location'),
     id: document.getElementById('f-id'),
     name: document.getElementById('f-name'),
+    fieldSetSelect: document.getElementById('f-fieldset'),
     extraContainer: document.getElementById('extra-fields'),
     preview: document.getElementById('preview'),
     pane: document.getElementById('qr-pane'),
     canvas: document.getElementById('qr-canvas'),
     next: document.getElementById('next'),
+    ltcFps: document.getElementById('f-ltc-fps'),
+    ltcToggle: document.getElementById('ltc-toggle'),
+    ltcReadout: document.getElementById('ltc-readout'),
   };
 
   // [{ name, resetOnNext, input }], rebuilt by buildExtraFieldInputs().
   let extraFieldState = [];
+
+  // Guarantees a no-extra-fields option always exists, case-insensitively
+  // ("Plain", "Default", or anything already literally empty all count),
+  // without duplicating one a project already defined under its own name.
+  function ensurePlainFieldSet(fieldSets) {
+    const hasPlainEquivalent = Object.entries(fieldSets).some(
+      ([name, fields]) => /^(plain|default)$/i.test(name) || fields.length === 0,
+    );
+    if (!hasPlainEquivalent) {
+      return { [PLAIN_FIELD_SET_NAME]: [], ...fieldSets };
+    }
+    return fieldSets;
+  }
+
+  function populateFieldSetDropdown(fieldSets) {
+    const resolved = ensurePlainFieldSet(fieldSets);
+    els.fieldSetSelect.innerHTML = '';
+    for (const name of Object.keys(resolved)) {
+      const option = document.createElement('option');
+      option.value = name;
+      option.textContent = name;
+      els.fieldSetSelect.appendChild(option);
+    }
+    els.fieldSetSelect.onchange = () => {
+      buildExtraFieldInputs(resolved[els.fieldSetSelect.value]);
+      render();
+    };
+    buildExtraFieldInputs(resolved[els.fieldSetSelect.value]);
+  }
 
   function buildExtraFieldInputs(fields) {
     els.extraContainer.innerHTML = '';
@@ -2614,18 +2715,223 @@ qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
 
   fetch('fields.json')
     .then((r) => (r.ok ? r.json() : Promise.reject(new Error(r.statusText))))
-    .then((fields) => {
-      buildExtraFieldInputs(fields);
+    .then((fieldSets) => {
+      populateFieldSetDropdown(fieldSets);
       render();
     })
     .catch(() => {
       // No fields.json next to this file, or it's blocked (e.g. opened via
       // file:// -- some browsers don't allow fetch() of local files even
-      // same-directory). Fall back to the built-in list above, same as
+      // same-directory). Fall back to the built-in sets above, same as
       // running label-qr-gui with no --config.
-      buildExtraFieldInputs(DEFAULT_EXTRA_FIELDS);
+      populateFieldSetDropdown(DEFAULT_FIELD_SETS);
       render();
     });
+
+  /* --------------------------------------------------------------------
+   * SMPTE LTC (linear timecode) "warble" generator -- independent of the
+   * QR code above, for jam-syncing a camera/audio recorder's timecode by
+   * feeding this into its mic input. Bit-level frame format confirmed
+   * against SMPTE 12M's published layout (2026-11-26), not guessed:
+   *   bits 0-3 frame units, 4-7 user bits 1, 8-9 frame tens,
+   *   10 drop-frame flag, 11 color-frame flag, 12-15 user bits 2,
+   *   16-19 seconds units, 20-23 user bits 3, 24-25 seconds tens,
+   *   26-27 flag bits, 28-31 user bits 4, 32-35 minutes units,
+   *   36-39 user bits 5, 40-41 minutes tens, 42-43 flag bits,
+   *   44-47 user bits 6, 48-51 hours units, 52-55 user bits 7,
+   *   56-57 hours tens, 58-59 flag bits, 60-63 user bits 8,
+   *   64-79 sync word 0011111111111101.
+   * User-bit and flag-bit fields are left at 0 (unused) -- this
+   * generator only needs H:M:S:F to round-trip correctly for an
+   * auto-sync tool to correlate separate recordings' audio tracks, not
+   * full SMPTE-spec compliance for every optional field. Drop-frame
+   * counting (skipping frame numbers at certain minute boundaries, used
+   * by real 29.97fps drop-frame timecode to track wall-clock time
+   * exactly over long durations) isn't implemented either -- the 29.97
+   * option here is non-drop-frame, which drifts from true wall-clock
+   * time by about 3.6 seconds/hour but is simpler and still gives
+   * auto-sync tools a steadily-running signal to correlate against.
+   *
+   * Biphase mark coding (BMC), per bit-cell: a transition always happens
+   * at the start of the cell; a '1' bit has one additional transition
+   * exactly at the cell's midpoint (so a '1' cell completes two half-
+   * length segments, a '0' cell is one full-length segment) -- this is
+   * what produces the audible "warble." Runs inside an AudioWorklet (a
+   * dedicated, real-time-safe audio thread), not a plain callback on the
+   * main thread, so normal page activity (typing in a field, layout) can
+   * never glitch/corrupt the bit timing.
+   *
+   * Verified end-to-end (2026-11-26): generated 2 seconds of audio with
+   * this exact bit-building/BMC logic via a Node harness, wrote it to a
+   * WAV file, and decoded it with an independently-written Python
+   * biphase demodulator (reading transition timings directly from the
+   * PCM samples, not reusing any of this code's assumptions) -- the
+   * decoded H:M:S:F and sync-word position matched the encoder's input
+   * exactly. Neither harness is part of this repo; this is the same
+   * "decode with a real/independent reader" verification approach used
+   * for the QR library above.
+   * -------------------------------------------------------------------- */
+
+  const LTC_WORKLET_SOURCE = `
+    function buildFrameBits(h, m, s, f) {
+      const bits = new Uint8Array(80);
+      const setBcd = (start, width, value) => {
+        for (let i = 0; i < width; i++) bits[start + i] = (value >> i) & 1;
+      };
+      setBcd(0, 4, f % 10);
+      setBcd(8, 2, Math.floor(f / 10));
+      setBcd(16, 4, s % 10);
+      setBcd(24, 2, Math.floor(s / 10));
+      setBcd(32, 4, m % 10);
+      setBcd(40, 2, Math.floor(m / 10));
+      setBcd(48, 4, h % 10);
+      setBcd(56, 2, Math.floor(h / 10));
+      const sync = [0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1];
+      for (let i = 0; i < 16; i++) bits[64 + i] = sync[i];
+      return bits;
+    }
+
+    class LtcProcessor extends AudioWorkletProcessor {
+      constructor() {
+        super();
+        this.running = false;
+        this.frameBits = null;
+        this.port.onmessage = (e) => {
+          const msg = e.data;
+          if (msg.type === 'start') {
+            this.fps = msg.fps;
+            // 29.97 NDF counts frames 0-29 per second, same as true 30fps.
+            this.nominalFrameCount = Math.round(this.fps);
+            this.samplesPerBit = sampleRate / (this.fps * 80);
+            this.h = msg.h;
+            this.m = msg.m;
+            this.s = msg.s;
+            this.f = msg.f;
+            this.frameBits = buildFrameBits(this.h, this.m, this.s, this.f);
+            this.bitIndex = 0;
+            this.subhalf = 0;
+            this.polarity = 1;
+            this.samplesLeftInSegment = this.segmentDuration();
+            this.running = true;
+            this.port.postMessage({ h: this.h, m: this.m, s: this.s, f: this.f });
+          } else if (msg.type === 'stop') {
+            this.running = false;
+          }
+        };
+      }
+
+      segmentDuration() {
+        // A '1' bit is two half-length segments (an extra transition at
+        // the cell's midpoint); a '0' bit is one full-length segment.
+        return this.frameBits[this.bitIndex] === 1 ? this.samplesPerBit / 2 : this.samplesPerBit;
+      }
+
+      advance() {
+        const bit = this.frameBits[this.bitIndex];
+        if (bit === 1 && this.subhalf === 0) {
+          this.subhalf = 1;
+        } else {
+          this.subhalf = 0;
+          this.bitIndex += 1;
+          if (this.bitIndex >= 80) {
+            this.bitIndex = 0;
+            this.f += 1;
+            if (this.f >= this.nominalFrameCount) {
+              this.f = 0;
+              this.s += 1;
+              if (this.s >= 60) {
+                this.s = 0;
+                this.m += 1;
+                if (this.m >= 60) {
+                  this.m = 0;
+                  this.h = (this.h + 1) % 24;
+                }
+              }
+            }
+            this.frameBits = buildFrameBits(this.h, this.m, this.s, this.f);
+            this.port.postMessage({ h: this.h, m: this.m, s: this.s, f: this.f });
+          }
+        }
+        // += (not =) carries over any fractional remainder from the
+        // previous segment, so a non-integer samples-per-bit rate (e.g.
+        // 29.97fps at 48kHz) stays accurate on average instead of
+        // drifting -- the same idea as Bresenham's line algorithm.
+        this.samplesLeftInSegment += this.segmentDuration();
+        this.polarity = -this.polarity;
+      }
+
+      process(_inputs, outputs) {
+        const output = outputs[0][0];
+        if (!this.running || !this.frameBits) {
+          output.fill(0);
+          return true;
+        }
+        for (let i = 0; i < output.length; i++) {
+          output[i] = this.polarity * 0.8;
+          this.samplesLeftInSegment -= 1;
+          if (this.samplesLeftInSegment <= 0) this.advance();
+        }
+        return true;
+      }
+    }
+    registerProcessor('ltc-processor', LtcProcessor);
+  `;
+
+  let ltcAudioContext = null;
+  let ltcNode = null;
+  let ltcRunning = false;
+
+  async function ensureLtcNode() {
+    if (ltcNode) return ltcNode;
+   ltcAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const blob = new Blob([LTC_WORKLET_SOURCE], { type: 'application/javascript' });
+    const url = URL.createObjectURL(blob);
+    await ltcAudioContext.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+    ltcNode = new AudioWorkletNode(ltcAudioContext, 'ltc-processor', {
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+    });
+    ltcNode.port.onmessage = (e) => {
+      const { h, m, s, f } = e.data;
+      const pad = (n) => String(n).padStart(2, '0');
+      els.ltcReadout.textContent = `${pad(h)}:${pad(m)}:${pad(s)}:${pad(f)}`;
+    };
+    ltcNode.connect(ltcAudioContext.destination);
+    return ltcNode;
+  }
+
+  els.ltcToggle.addEventListener('click', async () => {
+    if (ltcRunning) {
+      if (ltcNode) ltcNode.port.postMessage({ type: 'stop' });
+      ltcRunning = false;
+      els.ltcToggle.textContent = 'Start Timecode';
+      els.ltcToggle.classList.remove('active');
+      els.ltcFps.disabled = false;
+      return;
+    }
+
+    const node = await ensureLtcNode();
+    if (ltcAudioContext.state === 'suspended') await ltcAudioContext.resume();
+
+    // Jam-sync to this device's current wall-clock time of day; the
+    // processor free-runs from here (see its module doc above for why
+    // that's the realistic amount of "sync" this can offer).
+    const fps = parseFloat(els.ltcFps.value);
+    const now = new Date();
+    node.port.postMessage({
+      type: 'start',
+      fps,
+      h: now.getHours(),
+      m: now.getMinutes(),
+      s: now.getSeconds(),
+      f: Math.floor((now.getMilliseconds() / 1000) * Math.round(fps)),
+    });
+    ltcRunning = true;
+    els.ltcToggle.textContent = 'Stop Timecode';
+    els.ltcToggle.classList.add('active');
+    els.ltcFps.disabled = true;
+  });
 })();
 </script>
 </body>

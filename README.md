@@ -26,12 +26,17 @@ afterward.
    QR code. Open it directly from a phone's local storage (`file://`,
    fully offline) or host it anywhere static (e.g. GitHub Pages) and "Add
    to Home Screen." Extra fields work the same way as `--config
-   fields.toml`, but via a JSON sidecar file instead: copy
+   fields.toml`, but grouped into named **metadata sets** picked from a
+   "Metadata Set" dropdown (a project with more than one kind of shoot —
+   survey vs. inspection, say — can define one field set per kind instead
+   of a single fixed list) via a JSON sidecar file: copy
    [`fields.example.json`](label-qr-gui/web/fields.example.json) to
    `fields.json` next to `index.html` (only takes effect when the page is
    fetched over http(s) — some browsers block `fetch()` of local files
-   opened via `file://`) or edit the `DEFAULT_EXTRA_FIELDS` array near
-   the bottom of `index.html` directly, which works either way. QR
+   opened via `file://`) or edit the `DEFAULT_FIELD_SETS` object near
+   the bottom of `index.html` directly, which works either way. A "Plain"
+   set (no extra fields) is always available even if it isn't explicitly
+   listed. QR
    encoding is handled by a vendored, unmodified copy of Kazuhiko Arase's
    MIT-licensed [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator)
    — see the license comment at the top of its embedded `<script>` block.
@@ -39,6 +44,16 @@ afterward.
    `label-qr-gui --export-web <DIR>` writes `index.html` and
    `fields.example.json` into `DIR` (both are embedded in the binary via
    `include_str!`) instead of launching the GUI. ✅ implemented.
+
+   The page also has a **Timecode Warble** section, independent of the QR
+   code — a "Start Timecode" button plays a continuous SMPTE LTC audio
+   signal (24/25/29.97-NDF/30fps) through the device's audio output via
+   the Web Audio API. Feed that into a camera or audio recorder's mic
+   input to help auto-sync tools (DaVinci Resolve, PluralEyes, etc.)
+   align multiple cameras/audio recordings afterward. It jam-syncs to the
+   device's own clock when started and then free-runs — there's no
+   external time reference, so how well multiple devices line up depends
+   on how well their clocks already agree. ✅ implemented.
 2. **`photo-splitter`** — a CLI that walks a directory of time-ordered
    photos, treats each QR-code frame as the start of a new group, and
    moves everything up to the next QR frame into
