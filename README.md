@@ -17,6 +17,25 @@ afterward.
    [`fields.example.toml`](label-qr-gui/fields.example.toml)); their
    values are embedded in the QR's JSON payload alongside the built-in
    fields, under `"extra"`. ✅ implemented.
+
+   **[`web/index.html`](label-qr-gui/web/index.html)** is a browser-based
+   alternative to the native GUI — a single self-contained HTML file (no
+   build step, no server, no network access required) with the same five
+   built-in fields, the same JSON payload shape, and the same "Next"
+   semantics, so `photo-splitter` can't tell which one produced a given
+   QR code. Open it directly from a phone's local storage (`file://`,
+   fully offline) or host it anywhere static (e.g. GitHub Pages) and "Add
+   to Home Screen." Extra fields work the same way as `--config
+   fields.toml`, but via a JSON sidecar file instead: copy
+   [`fields.example.json`](label-qr-gui/web/fields.example.json) to
+   `fields.json` next to `index.html` (only takes effect when the page is
+   fetched over http(s) — some browsers block `fetch()` of local files
+   opened via `file://`) or edit the `DEFAULT_EXTRA_FIELDS` array near
+   the bottom of `index.html` directly, which works either way. QR
+   encoding is handled by a vendored, unmodified copy of Kazuhiko Arase's
+   MIT-licensed [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator)
+   — see the license comment at the top of its embedded `<script>` block.
+   ✅ implemented.
 2. **`photo-splitter`** — a CLI that walks a directory of time-ordered
    photos, treats each QR-code frame as the start of a new group, and
    moves everything up to the next QR frame into
@@ -170,6 +189,7 @@ of extra fields varies per project/config file, and writes it into
 
 ```
 label-qr-gui/      GUI appliance (egui/eframe) — crate implemented
+  web/             browser-based alternative, no build/install needed
 photo-splitter/    CLI — crate implemented
 ```
 

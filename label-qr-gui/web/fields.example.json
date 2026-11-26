@@ -1,0 +1,5 @@
+[
+  { "name": "Surveyor" },
+  { "name": "Permit Number" },
+  { "name": "Notes", "reset_on_next": true }
+]
