@@ -412,24 +412,57 @@ fn group_dir(dir: &Path, label: &LabelPayload, disambiguate_with_id: bool) -> Pa
         .join(date_component)
 }
 
+/// Does `dest` already hold a `metadata.yaml` for the exact same label?
+/// Used to tell a genuine duplicate marker (the same printed/on-screen QR
+/// code photographed again -- e.g. to start a second camera, or because
+/// a printed card gets shown to several cameras in turn) apart from an
+/// unrelated different shoot that just happens to share Client/Project/
+/// Location/Name/date. Anything short of an exact match (missing/
+/// unreadable/different metadata.yaml) is treated conservatively as "not
+/// a match" -- never merge into a directory without being sure.
+fn existing_metadata_matches(dest: &Path, label: &LabelPayload) -> bool {
+    fs::read_to_string(dest.join("metadata.yaml"))
+        .ok()
+        .and_then(|text| serde_yaml::from_str::<LabelPayload>(&text).ok())
+        .is_some_and(|existing| existing == *label)
+}
+
+/// Picks `finish_group`'s destination directory, and whether it's a
+/// fresh one or an existing one being merged into (a duplicate marker).
+/// Checks the plain date path first, then the ID-disambiguated one,
+/// since either could already hold a match (the first occurrence of
+/// this exact label might itself have needed disambiguating, if it
+/// collided with a genuinely different shoot).
+fn resolve_group_dest(dir: &Path, label: &LabelPayload) -> (PathBuf, bool) {
+    let plain_dest = group_dir(dir, label, false);
+    if existing_metadata_matches(&plain_dest, label) {
+        return (plain_dest, true);
+    }
+    if !plain_dest.exists() {
+        return (plain_dest, false);
+    }
+
+    let id_dest = group_dir(dir, label, true);
+    if existing_metadata_matches(&id_dest, label) {
+        return (id_dest, true);
+    }
+    (id_dest, false)
+}
+
 fn finish_group(group: Group, dir: &Path, dry_run: bool, tag_prefix: Option<&str>) -> Result<()> {
-    let plain_dest = group_dir(dir, &group.label, false);
-    let dest = if plain_dest.exists() {
-        group_dir(dir, &group.label, true)
-    } else {
-        plain_dest
-    };
+    let (dest, merging) = resolve_group_dest(dir, &group.label);
 
     if dry_run {
         log::info!(
-            "[dry run] would create {} with {} file(s)",
+            "[dry run] would {} {} with {} file(s)",
+            if merging { "merge into" } else { "create" },
             dest.display(),
             group.members.len()
         );
         return Ok(());
     }
 
-    if dest.exists() {
+    if dest.exists() && !merging {
         bail!(
             "destination {} already exists, refusing to merge/overwrite",
             dest.display()
@@ -452,11 +485,21 @@ fn finish_group(group: Group, dir: &Path, dry_run: bool, tag_prefix: Option<&str
         }
     }
 
+    // Re-written unconditionally even when merging -- harmless, since
+    // `merging` only happens when it's already byte-for-byte identical.
     let yaml = serde_yaml::to_string(&group.label)?;
     fs::write(dest.join("metadata.yaml"), yaml)
         .with_context(|| format!("writing metadata.yaml in {}", dest.display()))?;
 
-    log::info!("{} ({} file(s))", dest.display(), group.members.len());
+    if merging {
+        log::info!(
+            "{} ({} file(s) merged in -- duplicate marker)",
+            dest.display(),
+            group.members.len()
+        );
+    } else {
+        log::info!("{} ({} file(s))", dest.display(), group.members.len());
+    }
     Ok(())
 }
 
@@ -924,6 +967,75 @@ mod tests {
         assert!(marker.exists(), "marker must not be moved on failure");
     }
 
+    #[test]
+    fn finish_group_merges_into_an_existing_directory_with_an_identical_label() {
+        // The same printed/on-screen QR code photographed twice (e.g. to
+        // start a second camera) decodes to the exact same LabelPayload
+        // -- this must merge into the first occurrence's directory, not
+        // error out the way a genuinely different same-day shoot would.
+        let dir = tempfile::tempdir().unwrap();
+        let label = sample_label();
+
+        let first_marker = dir.path().join("camera1_marker.jpg");
+        fs::write(&first_marker, b"marker1").unwrap();
+        finish_group(
+            Group::new(label.clone(), first_marker),
+            dir.path(),
+            false,
+            None,
+        )
+        .unwrap();
+
+        let dest = group_dir(dir.path(), &label, false);
+        assert!(dest.join("camera1_marker.jpg").is_file());
+
+        let second_marker = dir.path().join("camera2_marker.jpg");
+        fs::write(&second_marker, b"marker2").unwrap();
+        let second_member = dir.path().join("camera2_member.jpg");
+        fs::write(&second_member, b"member2").unwrap();
+        let mut group2 = Group::new(label.clone(), second_marker);
+        group2.members.push(second_member);
+        finish_group(group2, dir.path(), false, None).unwrap();
+
+        // Both occurrences' files ended up in the same single directory.
+        assert!(dest.join("camera1_marker.jpg").is_file());
+        assert!(dest.join("camera2_marker.jpg").is_file());
+        assert!(dest.join("camera2_member.jpg").is_file());
+        assert!(
+            !group_dir(dir.path(), &label, true).exists(),
+            "a duplicate marker must not get disambiguated into a second directory"
+        );
+
+        let yaml = fs::read_to_string(dest.join("metadata.yaml")).unwrap();
+        let roundtripped: LabelPayload = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(roundtripped, label);
+    }
+
+    #[test]
+    fn finish_group_still_disambiguates_when_the_plain_path_is_a_genuinely_different_shoot() {
+        let dir = tempfile::tempdir().unwrap();
+        let label = sample_label();
+
+        let other_marker = dir.path().join("other_marker.jpg");
+        fs::write(&other_marker, b"other").unwrap();
+        let mut other_label = label.clone();
+        other_label.id = label.id + 1; // a different shoot, not a duplicate
+        finish_group(
+            Group::new(other_label, other_marker),
+            dir.path(),
+            false,
+            None,
+        )
+        .unwrap();
+
+        let marker = dir.path().join("marker.jpg");
+        fs::write(&marker, b"marker").unwrap();
+        finish_group(Group::new(label.clone(), marker), dir.path(), false, None).unwrap();
+
+        let dest = group_dir(dir.path(), &label, true);
+        assert!(dest.join("marker.jpg").is_file());
+    }
+
     // ── full pipeline ────────────────────────────────────────────────────
 
     fn write_with_mtime(path: &Path, bytes: &[u8], seconds_from_epoch: u64) {
@@ -1033,6 +1145,46 @@ mod tests {
         let group2 = group_dir(dir.path(), &label(2, "same-name"), true);
         assert!(group1.join("a_marker1.jpg").is_file());
         assert!(group2.join("b_marker2.jpg").is_file());
+    }
+
+    #[test]
+    fn run_merges_a_duplicate_marker_shown_to_a_second_camera_into_one_directory() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Same exact label decoded twice -- e.g. a printed QR card shown
+        // to a second camera, or the on-screen label re-photographed by
+        // mistake -- with a real member file after each occurrence.
+        write_with_mtime(
+            &dir.path().join("a_camera1_marker.jpg"),
+            &make_qr_jpeg(&label(1, "dup")),
+            10,
+        );
+        write_with_mtime(&dir.path().join("b_camera1_member.jpg"), b"member", 20);
+        write_with_mtime(
+            &dir.path().join("c_camera2_marker.jpg"),
+            &make_qr_jpeg(&label(1, "dup")),
+            30,
+        );
+        write_with_mtime(&dir.path().join("d_camera2_member.jpg"), b"member", 40);
+
+        run(&Args {
+            dir: dir.path().to_path_buf(),
+            dry_run: false,
+            fast: false,
+            tag_prefix: None,
+            config: None,
+        })
+        .unwrap();
+
+        let dest = group_dir(dir.path(), &label(1, "dup"), false);
+        assert!(dest.join("a_camera1_marker.jpg").is_file());
+        assert!(dest.join("b_camera1_member.jpg").is_file());
+        assert!(dest.join("c_camera2_marker.jpg").is_file());
+        assert!(dest.join("d_camera2_member.jpg").is_file());
+        assert!(
+            !group_dir(dir.path(), &label(1, "dup"), true).exists(),
+            "a duplicate marker must not produce a second, ID-disambiguated directory"
+        );
     }
 
     #[test]

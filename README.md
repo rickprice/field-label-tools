@@ -6,17 +6,26 @@ afterward.
 
 ## Workflow
 
-1. **`label-qr-gui`** — a fullscreen appliance (meant to run under a
-   tiling WM like XMonad) with a metadata form on the left and a large,
-   high-contrast QR code on the right. Fill in Client / Project /
-   Location / ID / Name, photograph the screen as the first frame of a
-   shoot, then press **Next** (or hit Enter in the Name field) to bump
-   the ID and clear the Name for the next shoot while keeping
-   Client/Project/Location. Extra, project-specific fields can be added
-   with `--config fields.toml` (see
-   [`fields.example.toml`](label-qr-gui/fields.example.toml)); their
-   values are embedded in the QR's JSON payload alongside the built-in
-   fields, under `"extra"`. ✅ implemented.
+1. **`label-qr-gui`** ("QR Field Data") — a fullscreen appliance (meant to
+   run under a tiling WM like XMonad) with a metadata form on the left
+   and a large, high-contrast QR code on the right. Fill in Client /
+   Project / Location / ID / Name, photograph the screen as the first
+   frame of a shoot, then press **Next** (or hit Enter in the Name
+   field) to bump the ID and clear the Name for the next shoot while
+   keeping Client/Project/Location. **Print** opens the current QR code
+   (as an inline SVG, so it stays crisp at any size) in your default web
+   browser via `xdg-open`, for printing a physical card on paper that can
+   be held up to a camera instead of (or alongside) the on-screen
+   appliance — handy for handing the same label to several cameras in
+   turn. Extra, project-specific fields are grouped into named
+   **Metadata Sets**, picked from a dropdown, configured with `--config
+   fields.toml` (see
+   [`fields.example.toml`](label-qr-gui/fields.example.toml), which
+   includes a "Church Photos" example with multiline People/Address/
+   Phone Numbers fields); their values are embedded in the QR's JSON
+   payload alongside the built-in fields, under `"extra"`. A "Plain" set
+   (no extra fields) is always available even if you don't define one
+   yourself. ✅ implemented.
 
    **[`web/index.html`](label-qr-gui/web/index.html)** is a browser-based
    alternative to the native GUI — a single self-contained HTML file (no
@@ -36,7 +45,9 @@ afterward.
    opened via `file://`) or edit the `DEFAULT_FIELD_SETS` object near
    the bottom of `index.html` directly, which works either way. A "Plain"
    set (no extra fields) is always available even if it isn't explicitly
-   listed. QR
+   listed. Any field can set `"multiline": true` for a bigger text area
+   instead of a single-line box (see fields.example.json's "Church
+   Photos" set: People/Address/Phone Numbers). QR
    encoding is handled by a vendored, unmodified copy of Kazuhiko Arase's
    MIT-licensed [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator)
    — see the license comment at the top of its embedded `<script>` block.
@@ -63,7 +74,11 @@ afterward.
    `<Client>/<Project>/<Location>/<Name>/<yyyy-mm-dd>/`, writing a
    `metadata.yaml` file (the decoded QR payload verbatim) inside each
    folder. The date comes from the marker's embedded `timestamp_utc`,
-   not the photo's own EXIF capture time. If two shoots share
+   not the photo's own EXIF capture time. The exact same QR code
+   photographed more than once (e.g. a printed copy shown to several
+   cameras in turn, or an on-screen one re-photographed by mistake) just
+   merges all of that marker's files into the one directory, rather than
+   erroring or creating duplicates. If two *different* shoots share
    Client/Project/Location/Name *and* land on the same day, the second
    one's ID is appended to the date (`<yyyy-mm-dd>_<ID>/`) to
    disambiguate — ID stays invisible in the common case, only showing up
@@ -177,20 +192,36 @@ afterward.
 ## Configurable metadata
 
 Client / Project / Location / ID / Name are built in and always present.
-Additional fields are configured per project with a TOML file:
+Additional fields are grouped into named Metadata Sets (selectable from a
+dropdown) and configured per project with a TOML file:
 
 ```toml
-[[field]]
+[[set]]
+name = "Survey"
+
+[[set.field]]
 name = "Surveyor"
 
-[[field]]
+[[set.field]]
 name = "Notes"
 reset_on_next = true  # cleared on "Next", like Name; default is to persist, like Project/Location
+
+[[set]]
+name = "Church Photos"
+
+[[set.field]]
+name = "People"
+multiline = true  # a bigger text area instead of a single-line box
+
+[[set.field]]
+name = "Address"
+multiline = true
 ```
 
-Pass it to the GUI with `label-qr-gui --config fields.toml`. Each
-configured field's value ends up in the QR's JSON payload under
-`"extra"` (empty values are omitted), e.g.:
+Pass it to the GUI with `label-qr-gui --config fields.toml`. A "Plain"
+set (no extra fields) is always available even if you don't define one
+yourself. Each configured field's value ends up in the QR's JSON payload
+under `"extra"` (empty values are omitted), e.g.:
 
 ```json
 {"client":"Acme Co","project":"P1","location":"North Ridge","id":3,"name":"overview","timestamp_utc":"2026-11-26T00:10:00Z","extra":{"Surveyor":"J. Price"}}

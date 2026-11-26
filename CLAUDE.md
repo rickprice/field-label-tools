@@ -6,14 +6,40 @@ repository.
 ## Architecture
 
 ```
-label-qr-gui/      egui/eframe appliance. LabelApp holds the five
-                    built-in fields (Client/Project/Location/ID/Name)
-                    plus `extra: Vec<(ExtraFieldDef, String)>` loaded
-                    from an optional `--config` TOML file (see
-                    fields.example.toml). `payload()` serializes
-                    everything as JSON for the QR code (always including
-                    a `timestamp_utc` captured fresh on each draw),
-                    `folder_name()` previews a
+label-qr-gui/      egui/eframe appliance (window title/heading "QR Field
+                    Data" -- renamed from "Field Label" 2026-11-26,
+                    distinct from "Field Label Tools" the overall repo/
+                    project name, which didn't change). LabelApp holds
+                    the five built-in fields (Client/Project/Location/
+                    ID/Name) plus `field_sets: Vec<FieldSet>` (named
+                    Metadata Sets, each with its own `field:
+                    Vec<ExtraFieldDef>`, loaded from an optional
+                    `--config` TOML file -- see fields.example.toml) and
+                    `selected_set_index`; `extra: Vec<(ExtraFieldDef,
+                    String)>` is rebuilt from
+                    `field_sets[selected_set_index]` whenever the
+                    "Metadata Set" ComboBox selection changes (losing
+                    whatever was typed for the previously-selected set,
+                    same as web/index.html's buildExtraFieldInputs()).
+                    ensure_plain_field_set() guarantees a no-extra-fields
+                    "Plain" set always exists (checked case-insensitively
+                    against "Plain"/"Default", or any set that's already
+                    empty), the same guarantee web/index.html's
+                    ensurePlainFieldSet() makes -- TOML naturally
+                    expresses "named list of named lists" as nested
+                    `[[set]] name=... [[set.field]] name=...` array-of-
+                    tables rather than mimicking JSON's object-keyed-by-
+                    name shape, so the two config *formats* differ even
+                    though the underlying concept (named sets, guaranteed
+                    Plain fallback) is identical. A field's
+                    `multiline: bool` swaps `text_edit_singleline` for
+                    `egui::TextEdit::multiline` -- see
+                    fields.example.toml's "Church Photos" set (People/
+                    Address/Phone Numbers, all multiline) for the
+                    motivating real-world example. `payload()`
+                    serializes everything as JSON for the QR code
+                    (always including a `timestamp_utc` captured fresh
+                    on each draw), `folder_name()` previews a
                     `<Client>-<Project>-<Location>-<ID>-<Name>` string
                     from the five built-in fields only -- extra fields
                     never affect it, only the QR's "extra" map. This is
@@ -29,7 +55,23 @@ label-qr-gui/      egui/eframe appliance. LabelApp holds the five
                     draw_qr() renders QR modules directly with
                     egui::Painter (no image/raster step) so the code
                     stays crisp and purely black/white at any window
-                    size.
+                    size. The "Print" button is a separate code path
+                    (build_print_html/print_label): renders the QR via
+                    qrcode's `svg` feature (not draw_qr's egui::Painter
+                    path, which only knows how to draw into a live egui
+                    frame) into a minimal standalone HTML page with the
+                    folder_name()-style caption below it, written to a
+                    fixed path in the system temp dir and opened with
+                    `xdg-open` -- reuses the browser's own print dialog/
+                    PDF export rather than reimplementing print layout or
+                    PDF generation in Rust, matching the reasoning
+                    web/index.html's whole "just open it in a browser"
+                    approach already uses. Exists so a label can be
+                    printed on paper and held up to a camera, same as the
+                    on-screen appliance -- including, deliberately, to
+                    *multiple* cameras in turn (see photo-splitter's
+                    duplicate-marker merge entry below, which this
+                    motivated).
   web/index.html     Browser-based alternative front end, independent of
                     the Rust binary -- a single self-contained HTML file
                     (no build step/server/network access needed) that
@@ -76,7 +118,12 @@ label-qr-gui/      egui/eframe appliance. LabelApp holds the five
                     case-insensitively against "Plain"/"Default", or any
                     set that's already empty) -- there should always be a
                     quick way to skip extra fields entirely, the same as
-                    not passing --config to label-qr-gui.
+                    not passing --config to label-qr-gui. A field's
+                    `multiline: true` renders a `<textarea>` instead of a
+                    single-line `<input>` in buildExtraFieldInputs() --
+                    see fields.example.json's "Church Photos" set
+                    (People/Address/Phone Numbers), mirrored in the native
+                    GUI by ExtraFieldDef::multiline.
 
                     Separately from the QR code, the page also has an
                     SMPTE LTC ("timecode warble") generator for jam-
@@ -196,11 +243,23 @@ photo-splitter/     scans a directory of time-ordered photos (EXIF
                     (`group_dir`), where the date is parsed from the
                     marker's `timestamp_utc`, not the photo's own EXIF
                     capture time (`group_date`). If that plain date path
-                    is already taken (two shoots sharing Client/Project/
-                    Location/Name on the same day -- a real case, not
-                    just hypothetical, see below), `finish_group` retries
-                    once at `<yyyy-mm-dd>_<ID>/` before giving up; a
-                    collision at *that* path too still means a genuine
+                    is already taken, `resolve_group_dest` first checks
+                    whether the existing directory's metadata.yaml is
+                    byte-for-byte identical to this group's label
+                    (`existing_metadata_matches`) -- if so, this is a
+                    duplicate marker (the same printed/on-screen QR code
+                    photographed again, e.g. to start a second camera, or
+                    a printed card shown to several cameras in turn: see
+                    label-qr-gui's Print feature) and `finish_group`
+                    merges this group's files straight into that existing
+                    directory rather than erroring. Only when it's *not*
+                    a match (a genuinely different shoot that happens to
+                    share Client/Project/Location/Name on the same day --
+                    a real case, not just hypothetical, see below) does
+                    `finish_group` retry at `<yyyy-mm-dd>_<ID>/`, itself
+                    first checked the same way for a match before falling
+                    back to a fresh directory there too; only a collision
+                    at *that* path that *also* doesn't match is a genuine
                     `bail!`. A metadata.yaml (the decoded LabelPayload,
                     serde_yaml) goes in the leaf directory alongside the
                     photos. Each group is buffered in `Group` and only

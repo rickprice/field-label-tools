@@ -5,6 +5,7 @@ use anyhow::Context;
 use chrono::{Local, SecondsFormat, Timelike, Utc};
 use clap::Parser;
 use eframe::egui;
+use qrcode::render::svg;
 use qrcode::{Color as QrColor, EcLevel, QrCode};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -27,8 +28,9 @@ const LTC_FPS_OPTIONS: [(&str, f64, bool); 5] = [
     about = "Fullscreen appliance: enter field-label metadata on the left, read it back as a large QR code on the right"
 )]
 struct Args {
-    /// TOML file defining extra project-specific metadata fields to collect,
-    /// in addition to the built-in Project/Location/ID/Name fields
+    /// TOML file defining named Metadata Sets of extra project-specific
+    /// fields, selectable from a dropdown, in addition to the built-in
+    /// Client/Project/Location/ID/Name fields (see fields.example.toml)
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
@@ -65,8 +67,21 @@ fn export_web(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `[[set]]` is one named "Metadata Set" selectable from the GUI's
+/// dropdown, each with its own `[[set.field]]` list -- the TOML
+/// equivalent of web/index.html's `fields.json` (`{"SetName":
+/// [{name, reset_on_next}, ...], ...}`), just shaped the way TOML
+/// naturally expresses a named list of named lists rather than mimicking
+/// JSON's object-keyed-by-name structure.
 #[derive(Deserialize, Default)]
 struct FieldsConfig {
+    #[serde(default, rename = "set")]
+    sets: Vec<FieldSet>,
+}
+
+#[derive(Deserialize, Clone)]
+struct FieldSet {
+    name: String,
     #[serde(default)]
     field: Vec<ExtraFieldDef>,
 }
@@ -78,14 +93,49 @@ struct ExtraFieldDef {
     /// (like Project/Location). Defaults to keeping it.
     #[serde(default)]
     reset_on_next: bool,
+    /// Use a multi-line text area instead of a single-line box -- for a
+    /// field that commonly holds more than one line (a list of names, a
+    /// multi-line address, etc.).
+    #[serde(default)]
+    multiline: bool,
 }
 
-fn load_fields_config(path: &Path) -> anyhow::Result<Vec<ExtraFieldDef>> {
+/// A no-extra-fields "Plain" set is always available, even if the config
+/// file doesn't define one itself -- checked case-insensitively against
+/// "Plain"/"Default", or any set that's already empty -- so there's
+/// always a quick way to skip extra fields entirely, the same guarantee
+/// web/index.html's `ensurePlainFieldSet()` makes.
+fn ensure_plain_field_set(mut sets: Vec<FieldSet>) -> Vec<FieldSet> {
+    let has_plain_equivalent = sets.iter().any(|set| {
+        set.name.eq_ignore_ascii_case("plain")
+            || set.name.eq_ignore_ascii_case("default")
+            || set.field.is_empty()
+    });
+    if !has_plain_equivalent {
+        sets.insert(
+            0,
+            FieldSet {
+                name: "Plain".to_string(),
+                field: Vec::new(),
+            },
+        );
+    }
+    sets
+}
+
+fn default_field_sets() -> Vec<FieldSet> {
+    vec![FieldSet {
+        name: "Plain".to_string(),
+        field: Vec::new(),
+    }]
+}
+
+fn load_fields_config(path: &Path) -> anyhow::Result<Vec<FieldSet>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading fields config {}", path.display()))?;
     let config: FieldsConfig = toml::from_str(&text)
         .with_context(|| format!("parsing fields config {}", path.display()))?;
-    Ok(config.field)
+    Ok(ensure_plain_field_set(config.sets))
 }
 
 struct LabelApp {
@@ -94,6 +144,11 @@ struct LabelApp {
     location: String,
     id: u64,
     name: String,
+    field_sets: Vec<FieldSet>,
+    /// Index into `field_sets` for the currently selected Metadata Set.
+    selected_set_index: usize,
+    /// Rebuilt from `field_sets[selected_set_index]` whenever the
+    /// selection changes -- see `ui()`'s ComboBox handling.
     extra: Vec<(ExtraFieldDef, String)>,
     /// Index into LTC_FPS_OPTIONS for the currently selected rate.
     ltc_fps_index: usize,
@@ -107,21 +162,29 @@ struct LabelApp {
 }
 
 impl LabelApp {
-    fn new(extra_fields: Vec<ExtraFieldDef>) -> Self {
+    fn new(field_sets: Vec<FieldSet>) -> Self {
+        let extra = Self::build_extra(&field_sets[0]);
         Self {
             client: String::new(),
             project: String::new(),
             location: String::new(),
             id: 1,
             name: String::new(),
-            extra: extra_fields
-                .into_iter()
-                .map(|field| (field, String::new()))
-                .collect(),
+            field_sets,
+            selected_set_index: 0,
+            extra,
             ltc_fps_index: 1, // 25 fps, matching web/index.html's default
             ltc_readout: Arc::new(Mutex::new(None)),
             ltc_stream: None,
         }
+    }
+
+    fn build_extra(set: &FieldSet) -> Vec<(ExtraFieldDef, String)> {
+        set.field
+            .iter()
+            .cloned()
+            .map(|field| (field, String::new()))
+            .collect()
     }
 
     fn payload(&self) -> String {
@@ -177,7 +240,7 @@ impl eframe::App for LabelApp {
             .default_size(420.0)
             .show(ui, |ui| {
                 ui.add_space(16.0);
-                ui.heading("Field Label");
+                ui.heading("QR Field Data");
                 ui.add_space(12.0);
 
                 ui.label("Client");
@@ -200,9 +263,27 @@ impl eframe::App for LabelApp {
                 let name_resp = ui.text_edit_singleline(&mut self.name);
                 ui.add_space(8.0);
 
+                ui.label("Metadata Set");
+                let previous_set_index = self.selected_set_index;
+                egui::ComboBox::from_id_salt("field_set")
+                    .selected_text(&self.field_sets[self.selected_set_index].name)
+                    .show_ui(ui, |ui| {
+                        for (i, set) in self.field_sets.iter().enumerate() {
+                            ui.selectable_value(&mut self.selected_set_index, i, &set.name);
+                        }
+                    });
+                if self.selected_set_index != previous_set_index {
+                    self.extra = Self::build_extra(&self.field_sets[self.selected_set_index]);
+                }
+                ui.add_space(8.0);
+
                 for (field, value) in &mut self.extra {
                     ui.label(&field.name);
-                    ui.text_edit_singleline(value);
+                    if field.multiline {
+                        ui.add(egui::TextEdit::multiline(value).desired_rows(3));
+                    } else {
+                        ui.text_edit_singleline(value);
+                    }
                     ui.add_space(8.0);
                 }
 
@@ -212,9 +293,17 @@ impl eframe::App for LabelApp {
                 ui.monospace(self.folder_name());
                 ui.add_space(20.0);
 
-                let next_clicked = ui
-                    .add_sized([120.0, 40.0], egui::Button::new("Next"))
-                    .clicked();
+                let (next_clicked, print_clicked) = ui
+                    .horizontal(|ui| {
+                        let next = ui
+                            .add_sized([120.0, 40.0], egui::Button::new("Next"))
+                            .clicked();
+                        let print = ui
+                            .add_sized([120.0, 40.0], egui::Button::new("Print"))
+                            .clicked();
+                        (next, print)
+                    })
+                    .inner;
                 let enter_pressed =
                     name_resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
@@ -227,6 +316,12 @@ impl eframe::App for LabelApp {
                         }
                     }
                     name_resp.request_focus();
+                }
+
+                if print_clicked {
+                    if let Err(err) = print_label(&self.payload(), &self.folder_name()) {
+                        log::error!("could not open print preview: {err:#}");
+                    }
                 }
 
                 ui.add_space(24.0);
@@ -334,6 +429,58 @@ fn draw_qr(ui: &mut egui::Ui, payload: &str) {
             }
         }
     }
+}
+
+/// Builds a minimal, self-contained HTML page with the QR code (as inline
+/// SVG, so it prints crisp at any size/DPI rather than a raster image) and
+/// `caption` below it, writes it to a fixed path in the system temp
+/// directory, and opens it with the default web browser via `xdg-open` --
+/// reusing the browser's own print dialog/PDF export rather than
+/// reimplementing print layout or PDF generation in Rust, the same
+/// reasoning web/index.html's own "just open it in a browser" approach
+/// uses. Linux-only (`xdg-open`), matching this crate's `platforms.linux`
+/// in flake.nix.
+fn build_print_html(payload: &str, caption: &str) -> anyhow::Result<String> {
+    let code = QrCode::with_error_correction_level(payload, EcLevel::H)
+        .map_err(|err| anyhow::anyhow!("encoding QR payload: {err}"))?;
+    let svg_markup = code.render::<svg::Color>().min_dimensions(600, 600).build();
+
+    Ok(format!(
+        r#"<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Print QR Field Data</title>
+<style>
+  body {{ font-family: sans-serif; text-align: center; margin: 40px; }}
+  svg {{ width: 80%; max-width: 500px; height: auto; }}
+  .caption {{ margin-top: 16px; font-size: 1.1rem; }}
+</style>
+</head>
+<body>
+{svg_markup}
+<div class="caption">{escaped_caption}</div>
+</body>
+</html>
+"#,
+        escaped_caption = caption
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;"),
+    ))
+}
+
+fn print_label(payload: &str, caption: &str) -> anyhow::Result<()> {
+    let html = build_print_html(payload, caption)?;
+
+    let path = std::env::temp_dir().join("label-qr-gui-print.html");
+    std::fs::write(&path, html).with_context(|| format!("writing {}", path.display()))?;
+
+    std::process::Command::new("xdg-open")
+        .arg(&path)
+        .spawn()
+        .with_context(|| format!("opening {} with xdg-open", path.display()))?;
+    Ok(())
 }
 
 /// Opens the system default audio output and starts an [`ltc::LtcGenerator`]
@@ -451,28 +598,28 @@ fn main() -> eframe::Result {
         return Ok(());
     }
 
-    let extra_fields = match &args.config {
+    let field_sets = match &args.config {
         Some(path) => match load_fields_config(path) {
-            Ok(fields) => fields,
+            Ok(sets) => sets,
             Err(err) => {
                 log::error!("{err:#}");
                 std::process::exit(1);
             }
         },
-        None => Vec::new(),
+        None => default_field_sets(),
     };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1600.0, 900.0])
-            .with_title("Field Label"),
+            .with_title("QR Field Data"),
         ..Default::default()
     };
 
     eframe::run_native(
-        "Field Label",
+        "QR Field Data",
         options,
-        Box::new(move |_cc| Ok(Box::new(LabelApp::new(extra_fields)))),
+        Box::new(move |_cc| Ok(Box::new(LabelApp::new(field_sets)))),
     )
 }
 
@@ -486,7 +633,7 @@ mod tests {
         export_web(dir.path()).unwrap();
 
         let index = std::fs::read_to_string(dir.path().join("index.html")).unwrap();
-        assert!(index.contains("<title>Field Label</title>"));
+        assert!(index.contains("<title>QR Field Data</title>"));
         assert!(index.contains("DEFAULT_FIELD_SETS"));
 
         let fields = std::fs::read_to_string(dir.path().join("fields.example.json")).unwrap();
@@ -499,5 +646,108 @@ mod tests {
         let nested = dir.path().join("a/b/c");
         export_web(&nested).unwrap();
         assert!(nested.join("index.html").is_file());
+    }
+
+    fn set_names(sets: &[FieldSet]) -> Vec<&str> {
+        sets.iter().map(|s| s.name.as_str()).collect()
+    }
+
+    #[test]
+    fn ensure_plain_field_set_injects_plain_first_when_none_qualifies() {
+        let sets = vec![FieldSet {
+            name: "Survey".to_string(),
+            field: vec![ExtraFieldDef {
+                name: "Surveyor".to_string(),
+                reset_on_next: false,
+                multiline: false,
+            }],
+        }];
+        let resolved = ensure_plain_field_set(sets);
+        assert_eq!(set_names(&resolved), vec!["Plain", "Survey"]);
+        assert!(resolved[0].field.is_empty());
+    }
+
+    #[test]
+    fn ensure_plain_field_set_does_not_duplicate_an_explicit_default_set() {
+        let sets = vec![
+            FieldSet {
+                name: "Default".to_string(),
+                field: Vec::new(),
+            },
+            FieldSet {
+                name: "Survey".to_string(),
+                field: vec![ExtraFieldDef {
+                    name: "Surveyor".to_string(),
+                    reset_on_next: false,
+                    multiline: false,
+                }],
+            },
+        ];
+        let resolved = ensure_plain_field_set(sets);
+        assert_eq!(set_names(&resolved), vec!["Default", "Survey"]);
+    }
+
+    #[test]
+    fn ensure_plain_field_set_counts_any_already_empty_set_as_satisfying() {
+        let sets = vec![FieldSet {
+            name: "Whatever".to_string(),
+            field: Vec::new(),
+        }];
+        let resolved = ensure_plain_field_set(sets);
+        assert_eq!(set_names(&resolved), vec!["Whatever"]);
+    }
+
+    #[test]
+    fn load_fields_config_parses_sets_with_multiline_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fields.toml");
+        std::fs::write(
+            &path,
+            r#"
+            [[set]]
+            name = "Church Photos"
+
+            [[set.field]]
+            name = "People"
+            multiline = true
+
+            [[set.field]]
+            name = "Notes"
+            reset_on_next = true
+            "#,
+        )
+        .unwrap();
+
+        let sets = load_fields_config(&path).unwrap();
+        assert_eq!(set_names(&sets), vec!["Plain", "Church Photos"]);
+        let church = &sets[1];
+        assert_eq!(church.field[0].name, "People");
+        assert!(church.field[0].multiline);
+        assert!(!church.field[0].reset_on_next);
+        assert_eq!(church.field[1].name, "Notes");
+        assert!(church.field[1].reset_on_next);
+    }
+
+    #[test]
+    fn build_print_html_embeds_a_scannable_qr_and_the_caption() {
+        let payload = r#"{"client":"Acme Co","project":"P1","location":"North Ridge","id":3,"name":"overview","timestamp_utc":"2026-11-26T00:00:00Z"}"#;
+        let html = build_print_html(payload, "Acme Co-P1-North Ridge-3-overview").unwrap();
+        assert!(html.contains("<svg"));
+        assert!(html.contains("Acme Co-P1-North Ridge-3-overview"));
+        assert!(html.contains("<title>Print QR Field Data</title>"));
+    }
+
+    #[test]
+    fn build_print_html_escapes_the_caption() {
+        let html = build_print_html("payload", "A & B <script>").unwrap();
+        assert!(html.contains("A &amp; B &lt;script&gt;"));
+        assert!(!html.contains("<script>"));
+    }
+
+    #[test]
+    fn default_field_sets_is_a_single_empty_plain_set() {
+        let sets = default_field_sets();
+        assert_eq!(set_names(&sets), vec!["Plain"]);
+        assert!(sets[0].field.is_empty());
     }
 }

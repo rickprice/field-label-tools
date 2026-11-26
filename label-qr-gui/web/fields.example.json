@@ -7,5 +7,10 @@
   "Inspection": [
     { "name": "Inspector" },
     { "name": "Notes", "reset_on_next": true }
+  ],
+  "Church Photos": [
+    { "name": "People", "multiline": true },
+    { "name": "Address", "multiline": true },
+    { "name": "Phone Numbers", "multiline": true }
   ]
 }

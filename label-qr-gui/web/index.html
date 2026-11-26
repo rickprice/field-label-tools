@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
-<title>Field Label</title>
+<title>QR Field Data</title>
 <style>
   :root { color-scheme: light; }
   * { box-sizing: border-box; }
@@ -43,7 +43,8 @@
   }
   input[type="text"],
   input[type="number"],
-  select {
+  select,
+  textarea {
     width: 100%;
     font-size: 1.05rem;
     padding: 8px;
@@ -52,6 +53,10 @@
     border-radius: 4px;
     background: #fff;
     color: #111;
+  }
+  textarea {
+    font-family: inherit;
+    resize: vertical;
   }
   #preview {
     margin-top: 20px;
@@ -129,7 +134,7 @@
 </head>
 <body>
   <div id="form">
-    <h1>Field Label</h1>
+    <h1>QR Field Data</h1>
     <div class="hint">
       Fill this in, then photograph the QR code as the first frame of a
       shoot.
@@ -2599,8 +2604,15 @@ qrcode.stringToBytes = qrcode.stringToBytesFuncs['UTF-8'];
     extraFieldState = fields.map((field) => {
       const label = document.createElement('label');
       label.textContent = field.name;
-      const input = document.createElement('input');
-      input.type = 'text';
+      // multiline: true gets a <textarea> instead of a single-line
+      // <input> -- for a field that commonly holds more than one line
+      // (a list of names, a multi-line address, etc.).
+      const input = field.multiline ? document.createElement('textarea') : document.createElement('input');
+      if (field.multiline) {
+        input.rows = 3;
+      } else {
+        input.type = 'text';
+      }
       input.autocomplete = 'off';
       input.addEventListener('input', render);
       label.appendChild(input);
