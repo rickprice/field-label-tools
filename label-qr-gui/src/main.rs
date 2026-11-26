@@ -44,6 +44,7 @@ fn load_fields_config(path: &Path) -> anyhow::Result<Vec<ExtraFieldDef>> {
 }
 
 struct LabelApp {
+    client: String,
     project: String,
     location: String,
     id: u64,
@@ -54,6 +55,7 @@ struct LabelApp {
 impl LabelApp {
     fn new(extra_fields: Vec<ExtraFieldDef>) -> Self {
         Self {
+            client: String::new(),
             project: String::new(),
             location: String::new(),
             id: 1,
@@ -67,6 +69,7 @@ impl LabelApp {
 
     fn payload(&self) -> String {
         let mut obj = Map::new();
+        obj.insert("client".into(), json!(self.client));
         obj.insert("project".into(), json!(self.project));
         obj.insert("location".into(), json!(self.location));
         obj.insert("id".into(), json!(self.id));
@@ -91,8 +94,8 @@ impl LabelApp {
 
     fn folder_name(&self) -> String {
         format!(
-            "{}-{}-{}-{}",
-            self.project, self.location, self.id, self.name
+            "{}-{}-{}-{}-{}",
+            self.client, self.project, self.location, self.id, self.name
         )
     }
 }
@@ -112,6 +115,10 @@ impl eframe::App for LabelApp {
                 ui.add_space(16.0);
                 ui.heading("Field Label");
                 ui.add_space(12.0);
+
+                ui.label("Client");
+                ui.text_edit_singleline(&mut self.client);
+                ui.add_space(8.0);
 
                 ui.label("Project");
                 ui.text_edit_singleline(&mut self.project);

@@ -6,34 +6,41 @@ repository.
 ## Architecture
 
 ```
-label-qr-gui/      egui/eframe appliance. LabelApp holds the four
-                    built-in fields plus `extra: Vec<(ExtraFieldDef,
-                    String)>` loaded from an optional `--config` TOML
-                    file (see fields.example.toml). `payload()`
-                    serializes everything as JSON for the QR code
-                    (always including a `timestamp_utc` captured fresh
-                    on each draw), `folder_name()` previews a
-                    `<Project>-<Location>-<ID>-<Name>` string from the
-                    four built-in fields only -- extra fields never
-                    affect it, only the QR's "extra" map. This is just a
-                    human-readable on-screen hint, not literally
+label-qr-gui/      egui/eframe appliance. LabelApp holds the five
+                    built-in fields (Client/Project/Location/ID/Name)
+                    plus `extra: Vec<(ExtraFieldDef, String)>` loaded
+                    from an optional `--config` TOML file (see
+                    fields.example.toml). `payload()` serializes
+                    everything as JSON for the QR code (always including
+                    a `timestamp_utc` captured fresh on each draw),
+                    `folder_name()` previews a
+                    `<Client>-<Project>-<Location>-<ID>-<Name>` string
+                    from the five built-in fields only -- extra fields
+                    never affect it, only the QR's "extra" map. This is
+                    just a human-readable on-screen hint, not literally
                     photo-splitter's output path (see below) -- the two
                     deliberately aren't kept in lockstep; if
                     photo-splitter's directory scheme changes again,
                     there's no requirement to update this string to
-                    match. draw_qr() renders QR modules directly with
+                    match. Client, like Project/Location, is NOT cleared
+                    on "Next" (only Name and reset_on_next-flagged extra
+                    fields are) -- it's meant to stay put across a whole
+                    engagement the same way Project/Location do.
+                    draw_qr() renders QR modules directly with
                     egui::Painter (no image/raster step) so the code
                     stays crisp and purely black/white at any window
                     size.
 photo-splitter/     scans a directory of time-ordered photos (EXIF
                     DateTimeOriginal, falling back to mtime), decodes
-                    each QR-marker frame via rqrr, and moves each
-                    group's files into
-                    `<Project>/<Location>/<Name>/<yyyy-mm-dd>/`
+                    each QR-marker frame via rqrr, applies configured
+                    field defaults to any still-blank built-in field
+                    (xmp::FieldDefaults::apply, see src/xmp.rs entry
+                    below), and moves each group's files into
+                    `<Client>/<Project>/<Location>/<Name>/<yyyy-mm-dd>/`
                     (`group_dir`), where the date is parsed from the
                     marker's `timestamp_utc`, not the photo's own EXIF
                     capture time (`group_date`). If that plain date path
-                    is already taken (two shoots sharing Project/
+                    is already taken (two shoots sharing Client/Project/
                     Location/Name on the same day -- a real case, not
                     just hypothetical, see below), `finish_group` retries
                     once at `<yyyy-mm-dd>_<ID>/` before giving up; a
@@ -47,38 +54,48 @@ photo-splitter/     scans a directory of time-ordered photos (EXIF
                     RUST_LOG=trace, dump_qr_debug_image() saves the exact
                     image handed to the QR detector for every photo into
                     a `_qr_debug/` folder next to it. Decoding all files
-                    (the expensive part) happens in one
-                    `entries.par_iter().map(decode_qr).collect()` BEFORE
-                    the grouping loop -- grouping itself must stay
-                    strictly sequential (it depends on seeing markers in
-                    time order), so it's cheap pure bookkeeping once
-                    `decoded` already holds every file's result. If a
+                    (the expensive part) and applying field defaults to
+                    each happens in one
+                    `entries.par_iter().map(|path| decode_qr(path,
+                    ...).map(|mut label| { field_defaults.apply(&mut
+                    label); label })).collect()` BEFORE the grouping
+                    loop -- grouping itself must stay strictly
+                    sequential (it depends on seeing markers in time
+                    order), so it's cheap pure bookkeeping once `decoded`
+                    already holds every file's (defaulted) result. If a
                     tag prefix resolves (xmp::resolve_tag_prefix), every
                     moved file also gets a <file>.xmp sidecar
                     (xmp::write_xmp_sidecar) written right after its
                     fs::rename, inside the same per-member loop in
                     finish_group.
-  src/xmp.rs         Config loading (tag_prefix, from --tag-prefix /
-                    --config / ~/.config/photo-splitter/config.toml,
-                    in that precedence) and XMP sidecar generation.
+  src/xmp.rs         Config loading (tag_prefix and FieldDefaults, from
+                    --tag-prefix / --config / ~/.config/photo-splitter/
+                    config.toml, in that precedence -- FieldDefaults has
+                    no CLI-flag equivalent of its own, only the --config/
+                    default-path path) and XMP sidecar generation.
                     Darktable hierarchical tags need TWO xmp fields
                     together -- confirmed against a real
                     Darktable-written sidecar, not guessed: dc:subject
                     (flat_tags -- every unique path *segment* across all
                     tags, deduplicated) and lr:hierarchicalSubject
                     (hierarchical_tags -- the actual pipe-joined
-                    "prefix|Field|value" paths). ID and timestamp_utc
-                    are deliberately not tagged (bookkeeping, not
-                    something you'd browse by; still in metadata.yaml).
-                    Writes no darktable:* processing-history attributes
-                    at all, since these sidecars are for photos
-                    Darktable has never seen -- this assumes Darktable's
-                    import reads foreign/minimal XMP for metadata the
-                    way it does for e.g. Lightroom sidecars, which
-                    hasn't been confirmed against a real Darktable
-                    import (no Darktable instance available to test
-                    with here), only against the on-disk XMP format
-                    itself.
+                    "prefix|Field|value" paths). hierarchical_tags skips
+                    any built-in or extra field whose value is blank
+                    (empty or whitespace-only) after FieldDefaults has
+                    already had a chance to fill it in -- so "no default
+                    configured for this field" and "omitted from the
+                    sidecar" fall out of the exact same blank check, no
+                    separate bookkeeping needed. ID and timestamp_utc are
+                    deliberately not tagged (bookkeeping, not something
+                    you'd browse by; still in metadata.yaml). Writes no
+                    darktable:* processing-history attributes at all,
+                    since these sidecars are for photos Darktable has
+                    never seen -- this assumes Darktable's import reads
+                    foreign/minimal XMP for metadata the way it does for
+                    e.g. Lightroom sidecars, which hasn't been confirmed
+                    against a real Darktable import (no Darktable
+                    instance available to test with here), only against
+                    the on-disk XMP format itself.
   src/raw_decode.rs  Two ways to get a grayscale image out of a RAW file
                     to scan for a QR code. `decode_default` (the
                     default) runs LibRaw's dcraw_process pipeline with
@@ -132,17 +149,17 @@ image today, i.e. explicitly ungrouped) -- not trying to encode it into
 
 ## The QR payload is JSON, not the dash-joined string
 
-`label-qr-gui` encodes the QR as a JSON object (`{"project":...,
-"location":..., "id":..., "name":..., "timestamp_utc":...,
+`label-qr-gui` encodes the QR as a JSON object (`{"client":...,
+"project":..., "location":..., "id":..., "name":..., "timestamp_utc":...,
 "extra":{...}}`), not as the
-`<Project>-<Location>-<ID>-<Name>` string shown in the UI preview. JSON
-round-trips safely even if a field itself contains a dash, and the
-`"extra"` map is open-ended (field names come from whatever config file
-was used at capture time). Keep this split (JSON on the wire,
-dash-joined string only as a human-readable on-screen hint -- not a
-preview of photo-splitter's actual output path, which is a nested
-`<Project>/<Location>/<Name>/<yyyy-mm-dd>/` directory, not this flat
-string; see photo-splitter's entry above).
+`<Client>-<Project>-<Location>-<ID>-<Name>` string shown in the UI
+preview. JSON round-trips safely even if a field itself contains a dash,
+and the `"extra"` map is open-ended (field names come from whatever
+config file was used at capture time). Keep this split (JSON on the
+wire, dash-joined string only as a human-readable on-screen hint -- not
+a preview of photo-splitter's actual output path, which is a nested
+`<Client>/<Project>/<Location>/<Name>/<yyyy-mm-dd>/` directory, not this
+flat string; see photo-splitter's entry above).
 `photo-splitter`'s `LabelPayload.extra` is a plain
 `BTreeMap<String, String>` deliberately -- it must treat keys as
 unknown/arbitrary, never assume a fixed schema -- and the field is
@@ -163,6 +180,22 @@ whenever it was last edited.
 - `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D
   warnings`, and `cargo test` must all pass before committing. CI
   enforces the same three.
+- `xmp::FieldDefaults` (`default_client`/`default_project`/
+  `default_location`/`default_name` in the same config file as
+  `tag_prefix`) exists so a missing/blank field doesn't produce an
+  inconsistent `_`-sanitized path component across a whole client's
+  shoots when the real value is actually always the same (e.g. one
+  `photo-splitter` install that only ever processes one client's
+  photos). It's deliberately config-file-only, with no `--default-client`
+  CLI flag -- unlike `tag_prefix`, these aren't expected to vary
+  per-invocation. Applied once per decoded label, inside the same
+  `par_iter` pass as `decode_qr` (before grouping), so both `group_dir`
+  and `xmp::write_xmp_sidecar` see the already-defaulted value; a field
+  still blank after that (no default configured) flows through
+  unchanged -- `sanitize` turns it into `_` in the path exactly as
+  before, and `hierarchical_tags`'s existing blank-skip omits it from
+  the XMP sidecar, so "no default" and "omit from the sidecar" require
+  no separate logic.
 - `xmp.rs`'s two-field hierarchical-tag structure (`dc:subject` +
   `lr:hierarchicalSubject`) isn't from Darktable's docs -- it's reverse
   engineered from a real Darktable-written sidecar the user pointed at

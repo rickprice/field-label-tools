@@ -31,6 +31,56 @@ use crate::LabelPayload;
 #[derive(Deserialize, Default)]
 struct ConfigFile {
     tag_prefix: Option<String>,
+    default_client: Option<String>,
+    default_project: Option<String>,
+    default_location: Option<String>,
+    default_name: Option<String>,
+}
+
+/// Configured fallback values for blank Client/Project/Location/Name
+/// fields, read from the same config file as `tag_prefix`. There's no
+/// CLI-flag override for these, unlike `tag_prefix` -- they're meant to be
+/// set once per install (e.g. a single client/project that's always the
+/// same), not vary per invocation.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct FieldDefaults {
+    pub client: Option<String>,
+    pub project: Option<String>,
+    pub location: Option<String>,
+    pub name: Option<String>,
+}
+
+impl From<ConfigFile> for FieldDefaults {
+    fn from(config: ConfigFile) -> Self {
+        Self {
+            client: config.default_client,
+            project: config.default_project,
+            location: config.default_location,
+            name: config.default_name,
+        }
+    }
+}
+
+impl FieldDefaults {
+    /// Fill in any blank (empty or whitespace-only) built-in field on
+    /// `label` with its configured default, leaving it blank if none is
+    /// configured. `hierarchical_tags` already omits still-blank fields
+    /// from the XMP sidecar, so "no default configured" and "omitted from
+    /// the sidecar" fall out of the same blank check for free.
+    pub fn apply(&self, label: &mut LabelPayload) {
+        Self::apply_one(&mut label.client, self.client.as_deref());
+        Self::apply_one(&mut label.project, self.project.as_deref());
+        Self::apply_one(&mut label.location, self.location.as_deref());
+        Self::apply_one(&mut label.name, self.name.as_deref());
+    }
+
+    fn apply_one(field: &mut String, default: Option<&str>) {
+        if field.trim().is_empty() {
+            if let Some(default) = default {
+                *field = default.to_string();
+            }
+        }
+    }
 }
 
 fn default_config_path() -> Option<PathBuf> {
@@ -76,25 +126,69 @@ fn resolve_tag_prefix_from(
     Ok(config.tag_prefix)
 }
 
+/// Resolve configured per-field defaults, from the same config file and
+/// precedence as `resolve_tag_prefix`: an explicit `--config <path>` (hard
+/// error if missing/invalid) or else the default
+/// `~/.config/photo-splitter/config.toml` (silently empty if absent).
+pub fn resolve_field_defaults(config_arg: Option<&Path>) -> Result<FieldDefaults> {
+    resolve_field_defaults_from(config_arg, default_config_path())
+}
+
+fn resolve_field_defaults_from(
+    config_arg: Option<&Path>,
+    default_path: Option<PathBuf>,
+) -> Result<FieldDefaults> {
+    if let Some(path) = config_arg {
+        let config = load_config_file(path)
+            .with_context(|| format!("loading config file {}", path.display()))?;
+        return Ok(config.into());
+    }
+
+    let Some(path) = default_path else {
+        return Ok(FieldDefaults::default());
+    };
+    if !path.is_file() {
+        return Ok(FieldDefaults::default());
+    }
+    let config = load_config_file(&path)
+        .with_context(|| format!("loading config file {}", path.display()))?;
+    Ok(config.into())
+}
+
 fn load_config_file(path: &Path) -> Result<ConfigFile> {
     let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
 }
 
-/// Hierarchical tags (`{prefix}|Project|...`, `{prefix}|Location|...`,
-/// `{prefix}|Name|...`, plus one per `extra` field) for one label. ID and
-/// timestamp_utc are deliberately not tagged -- they're bookkeeping/
-/// disambiguation data (ID especially: it's otherwise invisible in the
-/// output path), not the kind of thing you'd browse/filter photos by. Both
-/// are still in metadata.yaml for anyone who needs them.
+/// Hierarchical tags (`{prefix}|Client|...`, `{prefix}|Project|...`,
+/// `{prefix}|Location|...`, `{prefix}|Name|...`, plus one per `extra`
+/// field) for one label. A field whose value is blank (empty or
+/// whitespace-only) is skipped entirely -- e.g. `client` on a QR payload
+/// captured before that field existed -- rather than emitting a bare
+/// `{prefix}|Client|` tag that would just clutter Darktable's tag tree
+/// with an empty leaf. ID and timestamp_utc are deliberately not tagged at
+/// all -- they're bookkeeping/disambiguation data (ID especially: it's
+/// otherwise invisible in the output path), not the kind of thing you'd
+/// browse/filter photos by. Both are still in metadata.yaml for anyone who
+/// needs them.
 fn hierarchical_tags(label: &LabelPayload, tag_prefix: &str) -> Vec<String> {
-    let mut tags = vec![
-        format!("{tag_prefix}|Project|{}", label.project),
-        format!("{tag_prefix}|Location|{}", label.location),
-        format!("{tag_prefix}|Name|{}", label.name),
+    let built_in = [
+        ("Client", label.client.as_str()),
+        ("Project", label.project.as_str()),
+        ("Location", label.location.as_str()),
+        ("Name", label.name.as_str()),
     ];
+
+    let mut tags = Vec::new();
+    for (field, value) in built_in {
+        if !value.trim().is_empty() {
+            tags.push(format!("{tag_prefix}|{field}|{value}"));
+        }
+    }
     for (key, value) in &label.extra {
-        tags.push(format!("{tag_prefix}|{key}|{value}"));
+        if !value.trim().is_empty() {
+            tags.push(format!("{tag_prefix}|{key}|{value}"));
+        }
     }
     tags
 }
@@ -179,6 +273,7 @@ mod tests {
 
     fn label() -> LabelPayload {
         LabelPayload {
+            client: "Acme Co".into(),
             project: "P1".into(),
             location: "North Ridge".into(),
             id: 3,
@@ -189,14 +284,36 @@ mod tests {
     }
 
     #[test]
-    fn hierarchical_tags_cover_project_location_name_and_extra() {
+    fn hierarchical_tags_cover_client_project_location_name_and_extra() {
         let tags = hierarchical_tags(&label(), "PricePixel");
+        assert_eq!(
+            tags,
+            vec![
+                "PricePixel|Client|Acme Co",
+                "PricePixel|Project|P1",
+                "PricePixel|Location|North Ridge",
+                "PricePixel|Name|overview",
+                "PricePixel|Surveyor|J. Price",
+            ]
+        );
+    }
+
+    #[test]
+    fn hierarchical_tags_skips_blank_built_in_and_extra_fields() {
+        let mut label = label();
+        label.client = String::new();
+        label.name = "   ".into(); // whitespace-only counts as blank too
+        label.extra = BTreeMap::from([
+            ("Surveyor".to_string(), "J. Price".to_string()),
+            ("Notes".to_string(), String::new()),
+        ]);
+
+        let tags = hierarchical_tags(&label, "PricePixel");
         assert_eq!(
             tags,
             vec![
                 "PricePixel|Project|P1",
                 "PricePixel|Location|North Ridge",
-                "PricePixel|Name|overview",
                 "PricePixel|Surveyor|J. Price",
             ]
         );
@@ -238,6 +355,7 @@ mod tests {
         let xmp = fs::read_to_string(dir.path().join("marker.jpg.xmp")).unwrap();
         assert!(xmp.contains("<dc:subject>"));
         assert!(xmp.contains("<lr:hierarchicalSubject>"));
+        assert!(xmp.contains("<rdf:li>PricePixel|Client|Acme Co</rdf:li>"));
         assert!(xmp.contains("<rdf:li>PricePixel|Project|P1</rdf:li>"));
         assert!(xmp.contains("<rdf:li>PricePixel</rdf:li>"));
         assert!(xmp.contains("<rdf:li>P1</rdf:li>"));
@@ -292,5 +410,80 @@ mod tests {
 
         let resolved = resolve_tag_prefix_from(None, None, Some(default_path)).unwrap();
         assert_eq!(resolved, Some("FromDefault".to_string()));
+    }
+
+    #[test]
+    fn field_defaults_apply_fills_only_blank_fields() {
+        let defaults = FieldDefaults {
+            client: Some("Acme Co".to_string()),
+            project: Some("Default Project".to_string()),
+            location: None,
+            name: None,
+        };
+        let mut label = label();
+        label.client = String::new();
+        label.project = "Explicit Project".into(); // already set, must not be overwritten
+        label.location = "   ".into(); // whitespace-only counts as blank, but no default configured
+
+        defaults.apply(&mut label);
+
+        assert_eq!(label.client, "Acme Co");
+        assert_eq!(label.project, "Explicit Project");
+        assert_eq!(label.location, "   "); // left as-is: no default_location configured
+    }
+
+    #[test]
+    fn resolve_field_defaults_reads_an_explicit_config_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "default_client = \"Acme Co\"\ndefault_project = \"Default Project\"\n",
+        )
+        .unwrap();
+
+        let resolved = resolve_field_defaults(Some(&config_path)).unwrap();
+        assert_eq!(
+            resolved,
+            FieldDefaults {
+                client: Some("Acme Co".to_string()),
+                project: Some("Default Project".to_string()),
+                location: None,
+                name: None,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_field_defaults_errors_on_a_missing_explicit_config_path() {
+        let missing = Path::new("/nonexistent/config.toml");
+        assert!(resolve_field_defaults(Some(missing)).is_err());
+    }
+
+    #[test]
+    fn resolve_field_defaults_from_is_empty_when_the_default_path_does_not_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let default_path = dir.path().join("does-not-exist.toml");
+
+        let resolved = resolve_field_defaults_from(None, Some(default_path)).unwrap();
+        assert_eq!(resolved, FieldDefaults::default());
+    }
+
+    #[test]
+    fn resolve_field_defaults_from_reads_the_default_path_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let default_path = dir.path().join("config.toml");
+        fs::write(&default_path, "default_location = \"North Ridge\"\n").unwrap();
+
+        let resolved = resolve_field_defaults_from(None, Some(default_path)).unwrap();
+        assert_eq!(
+            resolved,
+            FieldDefaults {
+                client: None,
+                project: None,
+                location: Some("North Ridge".to_string()),
+                name: None,
+            }
+        );
     }
 }

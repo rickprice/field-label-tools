@@ -8,30 +8,36 @@ afterward.
 
 1. **`label-qr-gui`** — a fullscreen appliance (meant to run under a
    tiling WM like XMonad) with a metadata form on the left and a large,
-   high-contrast QR code on the right. Fill in Project / Location / ID /
-   Name, photograph the screen as the first frame of a shoot, then press
-   **Next** (or hit Enter in the Name field) to bump the ID and clear the
-   Name for the next shoot while keeping Project/Location. Extra,
-   project-specific fields can be added with `--config fields.toml` (see
+   high-contrast QR code on the right. Fill in Client / Project /
+   Location / ID / Name, photograph the screen as the first frame of a
+   shoot, then press **Next** (or hit Enter in the Name field) to bump
+   the ID and clear the Name for the next shoot while keeping
+   Client/Project/Location. Extra, project-specific fields can be added
+   with `--config fields.toml` (see
    [`fields.example.toml`](label-qr-gui/fields.example.toml)); their
    values are embedded in the QR's JSON payload alongside the built-in
    fields, under `"extra"`. ✅ implemented.
 2. **`photo-splitter`** — a CLI that walks a directory of time-ordered
    photos, treats each QR-code frame as the start of a new group, and
    moves everything up to the next QR frame into
-   `<Project>/<Location>/<Name>/<yyyy-mm-dd>/`, writing a `metadata.yaml`
-   file (the decoded QR payload verbatim) inside each folder. The date
-   comes from the marker's embedded `timestamp_utc`, not the photo's own
-   EXIF capture time. If two shoots share Project/Location/Name *and*
-   land on the same day, the second one's ID is appended to the date
-   (`<yyyy-mm-dd>_<ID>/`) to disambiguate — ID stays invisible in the
-   common case, only showing up when it's actually needed. Photos
-   themselves are ordered by EXIF `DateTimeOriginal` (falling back to
-   file mtime), and each group is only moved once its boundary is known
-   — i.e. once the next marker (or the end of the directory) is found —
-   so an interrupted run never leaves a group half-moved. Any files
-   before the first marker are left in place with a warning rather than
-   guessed at. ✅ implemented.
+   `<Client>/<Project>/<Location>/<Name>/<yyyy-mm-dd>/`, writing a
+   `metadata.yaml` file (the decoded QR payload verbatim) inside each
+   folder. The date comes from the marker's embedded `timestamp_utc`,
+   not the photo's own EXIF capture time. If two shoots share
+   Client/Project/Location/Name *and* land on the same day, the second
+   one's ID is appended to the date (`<yyyy-mm-dd>_<ID>/`) to
+   disambiguate — ID stays invisible in the common case, only showing up
+   when it's actually needed. Photos themselves are ordered by EXIF
+   `DateTimeOriginal` (falling back to file mtime), and each group is
+   only moved once its boundary is known — i.e. once the next marker (or
+   the end of the directory) is found — so an interrupted run never
+   leaves a group half-moved. Any files before the first marker are left
+   in place with a warning rather than guessed at. A blank built-in
+   field (e.g. a QR payload captured before `client` existed) can be
+   filled in with a configured default — see "Configurable field
+   defaults" below — and if no default is configured, it's left blank:
+   `sanitize`d to `_` in the folder path, and omitted entirely from the
+   XMP sidecar rather than appearing as an empty tag. ✅ implemented.
 
    RAW files (CR2/NEF/ARW/DNG/ORF/PEF, matching `darktable-import-xmp`'s
    supported list) are the primary target; JPEG/PNG/TIFF/BMP/WebP are
@@ -79,29 +85,48 @@ afterward.
 
    **Darktable XMP sidecars.** If a tag prefix is configured (see
    below), every photo also gets a `<filename>.xmp` sidecar with
-   Project/Location/Name (and any `extra` fields) written as Darktable
-   hierarchical tags under that prefix — e.g. `PricePixel|Project|...`,
-   `PricePixel|Location|...`. This mirrors the two XMP fields Darktable
-   itself writes for hierarchical tags (confirmed against a real
-   Darktable-generated sidecar): `dc:subject` (a flat, deduplicated set
-   of every tag-tree segment) and `lr:hierarchicalSubject` (the actual
-   pipe-joined paths). ID and `timestamp_utc` are deliberately *not*
-   tagged — they're bookkeeping, not something you'd browse photos by —
-   but both are still in `metadata.yaml`. No `darktable:*` processing-
-   history fields are written, since these sidecars are for photos
-   Darktable has never seen; this relies on Darktable's import reading
-   foreign/minimal XMP for metadata the same way it does for e.g.
-   Lightroom-originated sidecars (no edit history, since there isn't
-   any) — **verify this against a real Darktable import** before
-   relying on it, since it isn't something testable without a running
-   Darktable instance.
+   Client/Project/Location/Name (and any `extra` fields) written as
+   Darktable hierarchical tags under that prefix — e.g.
+   `PricePixel|Project|...`, `PricePixel|Location|...`. This mirrors the
+   two XMP fields Darktable itself writes for hierarchical tags
+   (confirmed against a real Darktable-generated sidecar): `dc:subject`
+   (a flat, deduplicated set of every tag-tree segment) and
+   `lr:hierarchicalSubject` (the actual pipe-joined paths). A blank
+   field (no value, and no configured default — see below) is omitted
+   from both entirely, rather than appearing as an empty tag. ID and
+   `timestamp_utc` are deliberately *not* tagged — they're bookkeeping,
+   not something you'd browse photos by — but both are still in
+   `metadata.yaml`. No `darktable:*` processing-history fields are
+   written, since these sidecars are for photos Darktable has never
+   seen; this relies on Darktable's import reading foreign/minimal XMP
+   for metadata the same way it does for e.g. Lightroom-originated
+   sidecars (no edit history, since there isn't any) — **verify this
+   against a real Darktable import** before relying on it, since it
+   isn't something testable without a running Darktable instance.
 
    The tag prefix resolves, in order: `--tag-prefix <value>` >
-   `--config <path>` (a TOML file with just `tag_prefix = "..."`; a
-   path given explicitly this way is a hard error if missing/invalid)
-   > the default config file at `~/.config/photo-splitter/config.toml`
-   (silently skipped if absent — no prefix configured means no XMP
-   sidecars are written at all, everything else works the same).
+   `--config <path>` (a path given explicitly this way is a hard error
+   if missing/invalid) > the default config file at
+   `~/.config/photo-splitter/config.toml` (silently skipped if absent —
+   no prefix configured means no XMP sidecars are written at all,
+   everything else works the same).
+
+   **Configurable field defaults.** The same config file can also set
+   `default_client`, `default_project`, `default_location`, and/or
+   `default_name` — fallback values filled into a photo's Client /
+   Project / Location / Name whenever that field comes out blank from
+   the QR payload (e.g. an older payload from before `client` existed,
+   or simply an unset field). There's no `--default-client`-style CLI
+   flag for these, unlike `--tag-prefix`; they're meant to be set once
+   per install (e.g. "I'm always shooting for Acme Co") rather than
+   vary per run. A field with no configured default is left blank:
+   `sanitize`d to `_` in the folder path (as always), and omitted
+   entirely from the XMP sidecar — see above.
+
+   ```toml
+   tag_prefix = "PricePixel"
+   default_client = "Acme Co"
+   ```
 3. **`darktable-export`** — still a stub; its originally-planned job
    (produce XMP sidecars) is now handled by `photo-splitter` directly
    (see above). Whether a separate import step is still needed at all
@@ -116,7 +141,7 @@ afterward.
 
 ## Configurable metadata
 
-Project / Location / ID / Name are built in and always present.
+Client / Project / Location / ID / Name are built in and always present.
 Additional fields are configured per project with a TOML file:
 
 ```toml
@@ -133,7 +158,7 @@ configured field's value ends up in the QR's JSON payload under
 `"extra"` (empty values are omitted), e.g.:
 
 ```json
-{"project":"P1","location":"North Ridge","id":3,"name":"overview","timestamp_utc":"2026-11-26T00:10:00Z","extra":{"Surveyor":"J. Price"}}
+{"client":"Acme Co","project":"P1","location":"North Ridge","id":3,"name":"overview","timestamp_utc":"2026-11-26T00:10:00Z","extra":{"Surveyor":"J. Price"}}
 ```
 
 The QR also always embeds `timestamp_utc` (RFC 3339, UTC, second

@@ -26,7 +26,7 @@ const RASTER_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "bmp",
 struct Args {
     /// Directory containing the photos to split. Each shoot's photos are
     /// moved out of here into a new
-    /// `<Project>/<Location>/<Name>/<yyyy-mm-dd>/` directory (the date
+    /// `<Client>/<Project>/<Location>/<Name>/<yyyy-mm-dd>/` directory (the date
     /// comes from the marker's embedded timestamp; `_<ID>` is appended to
     /// the date only if two shoots collide on the same day) once the next
     /// marker (or the end of the directory) is found, so partially-processed
@@ -53,8 +53,9 @@ struct Args {
     #[arg(long)]
     tag_prefix: Option<String>,
 
-    /// TOML config file (just `tag_prefix = "..."` for now) to read the tag
-    /// prefix from instead of the default config file at
+    /// TOML config file (`tag_prefix = "..."` and/or `default_client` /
+    /// `default_project` / `default_location` / `default_name`) to read
+    /// instead of the default config file at
     /// ~/.config/photo-splitter/config.toml. Unlike the default path, a
     /// --config path that doesn't exist or doesn't parse is a hard error,
     /// since it was asked for explicitly.
@@ -65,6 +66,12 @@ struct Args {
 /// The JSON payload label-qr-gui encodes into its QR code.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 struct LabelPayload {
+    /// Defaults to empty for QR payloads captured before this field existed
+    /// (real photos already captured during testing don't have it) --
+    /// `sanitize` turns that into a visible `_` path component rather than
+    /// silently dropping the level or merging with anything else.
+    #[serde(default)]
+    client: String,
     project: String,
     location: String,
     id: u64,
@@ -102,6 +109,7 @@ fn run(args: &Args) -> Result<()> {
             "no tag prefix configured (--tag-prefix / --config / default config file); not writing XMP sidecars"
         );
     }
+    let field_defaults = xmp::resolve_field_defaults(args.config.as_deref())?;
 
     let mut entries: Vec<PathBuf> = fs::read_dir(&args.dir)
         .with_context(|| format!("reading directory {}", args.dir.display()))?
@@ -123,7 +131,12 @@ fn run(args: &Args) -> Result<()> {
     // time order and stays strictly sequential.
     let decoded: Vec<Option<LabelPayload>> = entries
         .par_iter()
-        .map(|path| decode_qr(path, args.fast))
+        .map(|path| {
+            decode_qr(path, args.fast).map(|mut label| {
+                field_defaults.apply(&mut label);
+                label
+            })
+        })
         .collect();
 
     let mut current: Option<Group> = None;
@@ -342,12 +355,12 @@ fn group_date(label: &LabelPayload) -> String {
         .unwrap_or_else(|_| "unknown-date".to_string())
 }
 
-/// `<dir>/<Project>/<Location>/<Name>/<yyyy-mm-dd>`, optionally with the
-/// group's ID appended to the date component (`<yyyy-mm-dd>_<ID>`) to
-/// disambiguate two shoots that share Project/Location/Name and fall on the
-/// same day -- see `finish_group`, which only adds the suffix when the
-/// plain date path is already taken. Underscore rather than hyphen so it
-/// doesn't read as part of the date itself.
+/// `<dir>/<Client>/<Project>/<Location>/<Name>/<yyyy-mm-dd>`, optionally
+/// with the group's ID appended to the date component (`<yyyy-mm-dd>_<ID>`)
+/// to disambiguate two shoots that share Client/Project/Location/Name and
+/// fall on the same day -- see `finish_group`, which only adds the suffix
+/// when the plain date path is already taken. Underscore rather than
+/// hyphen so it doesn't read as part of the date itself.
 fn group_dir(dir: &Path, label: &LabelPayload, disambiguate_with_id: bool) -> PathBuf {
     let date = group_date(label);
     let date_component = if disambiguate_with_id {
@@ -355,7 +368,8 @@ fn group_dir(dir: &Path, label: &LabelPayload, disambiguate_with_id: bool) -> Pa
     } else {
         date
     };
-    dir.join(sanitize(&label.project))
+    dir.join(sanitize(&label.client))
+        .join(sanitize(&label.project))
         .join(sanitize(&label.location))
         .join(sanitize(&label.name))
         .join(date_component)
@@ -433,6 +447,7 @@ mod tests {
 
     fn sample_label() -> LabelPayload {
         LabelPayload {
+            client: "Acme Co".into(),
             project: "P1".into(),
             location: "North Ridge".into(),
             id: 3,
@@ -455,11 +470,12 @@ mod tests {
     }
 
     #[test]
-    fn group_dir_nests_by_project_location_name_then_date() {
+    fn group_dir_nests_by_client_project_location_name_then_date() {
         let dir = Path::new("/photos");
         assert_eq!(
             group_dir(dir, &sample_label(), false),
-            dir.join("P1")
+            dir.join("Acme Co")
+                .join("P1")
                 .join("North Ridge")
                 .join("overview")
                 .join("2026-11-26")
@@ -471,7 +487,8 @@ mod tests {
         let dir = Path::new("/photos");
         assert_eq!(
             group_dir(dir, &sample_label(), true),
-            dir.join("P1")
+            dir.join("Acme Co")
+                .join("P1")
                 .join("North Ridge")
                 .join("overview")
                 .join("2026-11-26_3")
@@ -545,6 +562,7 @@ mod tests {
     #[test]
     fn decode_qr_reads_back_a_real_label_payload() {
         let label = LabelPayload {
+            client: "Acme Co".into(),
             project: "P1".into(),
             location: "North Ridge".into(),
             id: 7,
@@ -690,6 +708,7 @@ mod tests {
 
     fn label(id: u64, name: &str) -> LabelPayload {
         LabelPayload {
+            client: "Acme Co".into(),
             project: "P1".into(),
             location: "North Ridge".into(),
             id,
@@ -783,5 +802,59 @@ mod tests {
         let group2 = group_dir(dir.path(), &label(2, "same-name"), true);
         assert!(group1.join("a_marker1.jpg").is_file());
         assert!(group2.join("b_marker2.jpg").is_file());
+    }
+
+    #[test]
+    fn run_applies_configured_field_defaults_and_omits_fields_with_no_default_from_xmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::write(
+            &config_path,
+            "tag_prefix = \"PricePixel\"\ndefault_client = \"Acme Co\"\n",
+        )
+        .unwrap();
+
+        // Client is blank (as if captured before label-qr-gui had the
+        // field) and should pick up the configured default. Location is
+        // also blank but has no configured default, so it should stay
+        // blank -- `sanitize`d to "_" in the path, and omitted entirely
+        // from the XMP sidecar rather than showing up as an empty tag.
+        let mut blank_label = label(1, "overview");
+        blank_label.client = String::new();
+        blank_label.location = String::new();
+        write_with_mtime(
+            &dir.path().join("a_marker1.jpg"),
+            &make_qr_jpeg(&blank_label),
+            10,
+        );
+
+        run(&Args {
+            dir: dir.path().to_path_buf(),
+            dry_run: false,
+            fast: false,
+            tag_prefix: None,
+            config: Some(config_path),
+        })
+        .unwrap();
+
+        let mut expected = blank_label.clone();
+        expected.client = "Acme Co".into();
+        let dest = group_dir(dir.path(), &expected, false);
+        assert!(
+            dest.join("a_marker1.jpg").is_file(),
+            "group dir should use the defaulted client, not a blank/sanitized path"
+        );
+
+        let yaml: LabelPayload =
+            serde_yaml::from_str(&fs::read_to_string(dest.join("metadata.yaml")).unwrap()).unwrap();
+        assert_eq!(yaml.client, "Acme Co");
+        assert_eq!(yaml.location, "", "no default configured, so left blank");
+
+        let xmp = fs::read_to_string(dest.join("a_marker1.jpg.xmp")).unwrap();
+        assert!(xmp.contains("PricePixel|Client|Acme Co"));
+        assert!(
+            !xmp.contains("PricePixel|Location|"),
+            "a field with no configured default must not appear in the sidecar at all"
+        );
     }
 }
