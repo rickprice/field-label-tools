@@ -241,6 +241,12 @@ mod tests {
         assert!(xmp.contains("<rdf:li>PricePixel|Project|P1</rdf:li>"));
         assert!(xmp.contains("<rdf:li>PricePixel</rdf:li>"));
         assert!(xmp.contains("<rdf:li>P1</rdf:li>"));
+        // label()'s extra field (a stand-in for a label-qr-gui --config
+        // custom field, e.g. "Surveyor") must make it into both XMP fields
+        // too, not just the four built-in ones.
+        assert!(xmp.contains("<rdf:li>PricePixel|Surveyor|J. Price</rdf:li>"));
+        assert!(xmp.contains("<rdf:li>Surveyor</rdf:li>"));
+        assert!(xmp.contains("<rdf:li>J. Price</rdf:li>"));
     }
 
     #[test]
