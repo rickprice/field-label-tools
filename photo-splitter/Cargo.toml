@@ -8,7 +8,9 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 readme = "../README.md"
+keywords = ["qr-code", "raw", "photography", "darktable"]
 categories = ["command-line-utilities"]
+exclude = ["tests/fixtures/*"]
 
 [[bin]]
 name = "photo-splitter"
