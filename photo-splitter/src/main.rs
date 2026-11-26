@@ -24,9 +24,12 @@ const RASTER_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "tif", "tiff", "bmp",
 )]
 struct Args {
     /// Directory containing the photos to split. Each shoot's photos are
-    /// moved out of here into a new `<Project>-<Location>-<ID>-<Name>`
-    /// subdirectory once the next marker (or the end of the directory) is
-    /// found, so partially-processed shoots are never left half-moved.
+    /// moved out of here into a new
+    /// `<Project>/<Location>/<Name>/<yyyy-mm-dd>/` directory (the date
+    /// comes from the marker's embedded timestamp; `-<ID>` is appended to
+    /// the date only if two shoots collide on the same day) once the next
+    /// marker (or the end of the directory) is found, so partially-processed
+    /// shoots are never left half-moved.
     dir: PathBuf,
 
     /// Show what would be grouped without moving any files or writing metadata
@@ -305,18 +308,41 @@ fn sanitize(s: &str) -> String {
     }
 }
 
-fn folder_name(label: &LabelPayload) -> String {
-    format!(
-        "{}-{}-{}-{}",
-        sanitize(&label.project),
-        sanitize(&label.location),
-        label.id,
-        sanitize(&label.name)
-    )
+/// The date portion of `timestamp_utc` (the embedded QR timestamp, not the
+/// photo's own EXIF capture time), formatted `yyyy-mm-dd`. Falls back to a
+/// clearly-labeled placeholder rather than panicking if a payload somehow
+/// carries a malformed timestamp.
+fn group_date(label: &LabelPayload) -> String {
+    chrono::DateTime::parse_from_rfc3339(&label.timestamp_utc)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|_| "unknown-date".to_string())
+}
+
+/// `<dir>/<Project>/<Location>/<Name>/<yyyy-mm-dd>`, optionally with the
+/// group's ID appended to the date component (`<yyyy-mm-dd>-<ID>`) to
+/// disambiguate two shoots that share Project/Location/Name and fall on the
+/// same day -- see `finish_group`, which only adds the suffix when the
+/// plain date path is already taken.
+fn group_dir(dir: &Path, label: &LabelPayload, disambiguate_with_id: bool) -> PathBuf {
+    let date = group_date(label);
+    let date_component = if disambiguate_with_id {
+        format!("{date}-{}", label.id)
+    } else {
+        date
+    };
+    dir.join(sanitize(&label.project))
+        .join(sanitize(&label.location))
+        .join(sanitize(&label.name))
+        .join(date_component)
 }
 
 fn finish_group(group: Group, dir: &Path, dry_run: bool) -> Result<()> {
-    let dest = dir.join(folder_name(&group.label));
+    let plain_dest = group_dir(dir, &group.label, false);
+    let dest = if plain_dest.exists() {
+        group_dir(dir, &group.label, true)
+    } else {
+        plain_dest
+    };
 
     if dry_run {
         log::info!(
@@ -334,7 +360,7 @@ fn finish_group(group: Group, dir: &Path, dry_run: bool) -> Result<()> {
         );
     }
 
-    fs::create_dir(&dest).with_context(|| format!("creating {}", dest.display()))?;
+    fs::create_dir_all(&dest).with_context(|| format!("creating {}", dest.display()))?;
 
     for member in &group.members {
         let file_name = member
@@ -358,7 +384,7 @@ mod tests {
     use super::*;
     use std::io::Cursor;
 
-    // ── sanitize / folder_name ───────────────────────────────────────────
+    // ── sanitize / group_dir ──────────────────────────────────────────────
 
     #[test]
     fn sanitize_leaves_plain_text_alone() {
@@ -375,17 +401,51 @@ mod tests {
         assert_eq!(sanitize("   "), "_");
     }
 
-    #[test]
-    fn folder_name_matches_expected_format() {
-        let label = LabelPayload {
+    fn sample_label() -> LabelPayload {
+        LabelPayload {
             project: "P1".into(),
             location: "North Ridge".into(),
             id: 3,
             name: "overview".into(),
-            timestamp_utc: "2026-11-26T00:00:00Z".into(),
+            timestamp_utc: "2026-11-26T14:30:00Z".into(),
             extra: BTreeMap::new(),
-        };
-        assert_eq!(folder_name(&label), "P1-North Ridge-3-overview");
+        }
+    }
+
+    #[test]
+    fn group_date_takes_just_the_date_portion_of_timestamp_utc() {
+        assert_eq!(group_date(&sample_label()), "2026-11-26");
+    }
+
+    #[test]
+    fn group_date_falls_back_for_a_malformed_timestamp() {
+        let mut label = sample_label();
+        label.timestamp_utc = "not a timestamp".into();
+        assert_eq!(group_date(&label), "unknown-date");
+    }
+
+    #[test]
+    fn group_dir_nests_by_project_location_name_then_date() {
+        let dir = Path::new("/photos");
+        assert_eq!(
+            group_dir(dir, &sample_label(), false),
+            dir.join("P1")
+                .join("North Ridge")
+                .join("overview")
+                .join("2026-11-26")
+        );
+    }
+
+    #[test]
+    fn group_dir_appends_id_to_the_date_only_when_disambiguating() {
+        let dir = Path::new("/photos");
+        assert_eq!(
+            group_dir(dir, &sample_label(), true),
+            dir.join("P1")
+                .join("North Ridge")
+                .join("overview")
+                .join("2026-11-26-3")
+        );
     }
 
     // ── real-camera fixtures (tests/fixtures/) ────────────────────────────
@@ -519,20 +579,13 @@ mod tests {
         fs::write(&marker, b"marker").unwrap();
         fs::write(&member, b"member").unwrap();
 
-        let label = LabelPayload {
-            project: "P1".into(),
-            location: "North Ridge".into(),
-            id: 3,
-            name: "overview".into(),
-            timestamp_utc: "2026-11-26T00:00:00Z".into(),
-            extra: BTreeMap::new(),
-        };
+        let label = sample_label();
         let mut group = Group::new(label.clone(), marker.clone());
         group.members.push(member.clone());
 
         finish_group(group, dir.path(), false).unwrap();
 
-        let dest = dir.path().join("P1-North Ridge-3-overview");
+        let dest = group_dir(dir.path(), &label, false);
         assert!(dest.join("marker.jpg").is_file());
         assert!(dest.join("member.jpg").is_file());
         assert!(!marker.exists());
@@ -549,37 +602,43 @@ mod tests {
         let marker = dir.path().join("marker.jpg");
         fs::write(&marker, b"marker").unwrap();
 
-        let label = LabelPayload {
-            project: "P1".into(),
-            location: "North Ridge".into(),
-            id: 3,
-            name: "overview".into(),
-            timestamp_utc: "2026-11-26T00:00:00Z".into(),
-            extra: BTreeMap::new(),
-        };
-        let group = Group::new(label, marker.clone());
+        let label = sample_label();
+        let group = Group::new(label.clone(), marker.clone());
 
         finish_group(group, dir.path(), true).unwrap();
 
         assert!(marker.exists());
-        assert!(!dir.path().join("P1-North Ridge-3-overview").exists());
+        assert!(!group_dir(dir.path(), &label, false).exists());
     }
 
     #[test]
-    fn finish_group_refuses_to_overwrite_an_existing_destination() {
+    fn finish_group_disambiguates_with_id_when_the_plain_date_is_taken() {
         let dir = tempfile::tempdir().unwrap();
         let marker = dir.path().join("marker.jpg");
         fs::write(&marker, b"marker").unwrap();
-        fs::create_dir(dir.path().join("P1-North Ridge-3-overview")).unwrap();
 
-        let label = LabelPayload {
-            project: "P1".into(),
-            location: "North Ridge".into(),
-            id: 3,
-            name: "overview".into(),
-            timestamp_utc: "2026-11-26T00:00:00Z".into(),
-            extra: BTreeMap::new(),
-        };
+        let label = sample_label();
+        // Simulate an earlier, unrelated shoot already occupying the plain
+        // <project>/<location>/<name>/<yyyy-mm-dd> path.
+        fs::create_dir_all(group_dir(dir.path(), &label, false)).unwrap();
+
+        let group = Group::new(label.clone(), marker.clone());
+        finish_group(group, dir.path(), false).unwrap();
+
+        let dest = group_dir(dir.path(), &label, true);
+        assert!(dest.join("marker.jpg").is_file());
+    }
+
+    #[test]
+    fn finish_group_refuses_to_overwrite_when_both_plain_and_id_suffixed_exist() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker.jpg");
+        fs::write(&marker, b"marker").unwrap();
+
+        let label = sample_label();
+        fs::create_dir_all(group_dir(dir.path(), &label, false)).unwrap();
+        fs::create_dir_all(group_dir(dir.path(), &label, true)).unwrap();
+
         let group = Group::new(label, marker.clone());
 
         assert!(finish_group(group, dir.path(), false).is_err());
@@ -642,7 +701,7 @@ mod tests {
         // Stray file before the first marker is left untouched.
         assert!(dir.path().join("z_stray.jpg").is_file());
 
-        let group1 = dir.path().join("P1-North Ridge-1-first");
+        let group1 = group_dir(dir.path(), &label(1, "first"), false);
         assert!(group1.join("a_marker1.jpg").is_file());
         assert!(group1.join("y_member1a.jpg").is_file());
         assert!(group1.join("x_member1b.jpg").is_file());
@@ -652,12 +711,43 @@ mod tests {
                 .unwrap();
         assert_eq!(yaml1, label(1, "first"));
 
-        let group2 = dir.path().join("P1-North Ridge-2-second");
+        let group2 = group_dir(dir.path(), &label(2, "second"), false);
         assert!(group2.join("b_marker2.jpg").is_file());
         assert!(group2.join("w_member2a.jpg").is_file());
         let yaml2: LabelPayload =
             serde_yaml::from_str(&fs::read_to_string(group2.join("metadata.yaml")).unwrap())
                 .unwrap();
         assert_eq!(yaml2, label(2, "second"));
+    }
+
+    #[test]
+    fn run_disambiguates_same_day_same_name_groups_with_id() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Two markers sharing Project/Location/Name and the same day --
+        // exactly the real-world case (two "Test2" shoots minutes apart)
+        // that motivated appending the ID only when it's actually needed.
+        write_with_mtime(
+            &dir.path().join("a_marker1.jpg"),
+            &make_qr_jpeg(&label(1, "same-name")),
+            10,
+        );
+        write_with_mtime(
+            &dir.path().join("b_marker2.jpg"),
+            &make_qr_jpeg(&label(2, "same-name")),
+            20,
+        );
+
+        run(&Args {
+            dir: dir.path().to_path_buf(),
+            dry_run: false,
+            fast: false,
+        })
+        .unwrap();
+
+        let group1 = group_dir(dir.path(), &label(1, "same-name"), false);
+        let group2 = group_dir(dir.path(), &label(2, "same-name"), true);
+        assert!(group1.join("a_marker1.jpg").is_file());
+        assert!(group2.join("b_marker2.jpg").is_file());
     }
 }

@@ -12,29 +12,44 @@ label-qr-gui/      egui/eframe appliance. LabelApp holds the four
                     file (see fields.example.toml). `payload()`
                     serializes everything as JSON for the QR code
                     (always including a `timestamp_utc` captured fresh
-                    on each draw), `folder_name()` previews the eventual
-                    `<Project>-<Location>-<ID>-<Name>` directory name
-                    from the four built-in fields only -- extra fields
-                    never affect the folder name, only the QR's "extra"
-                    map. draw_qr() renders QR modules directly with
+                    on each draw), `folder_name()` previews a
+                    `<Project>-<Location>-<ID>-<Name>` string from the
+                    four built-in fields only -- extra fields never
+                    affect it, only the QR's "extra" map. This is just a
+                    human-readable on-screen hint, not literally
+                    photo-splitter's output path (see below) -- the two
+                    deliberately aren't kept in lockstep; if
+                    photo-splitter's directory scheme changes again,
+                    there's no requirement to update this string to
+                    match. draw_qr() renders QR modules directly with
                     egui::Painter (no image/raster step) so the code
                     stays crisp and purely black/white at any window
                     size.
 photo-splitter/     scans a directory of time-ordered photos (EXIF
                     DateTimeOriginal, falling back to mtime), decodes
                     each QR-marker frame via rqrr, and moves each
-                    group's files into a `<Project>-<Location>-<ID>-
-                    <Name>/` folder with a metadata.yaml (the decoded
-                    LabelPayload, serde_yaml). Each group is buffered
-                    in `Group` and only moved (`finish_group`) once the
-                    *next* marker or end-of-directory is reached --
-                    never move a file before you know the group is
-                    complete. With RUST_LOG=trace, dump_qr_debug_image()
-                    saves the exact image handed to the QR detector for
-                    every photo into a `_qr_debug/` folder next to it.
-                    Decoding all files (the expensive part) happens in
-                    one `entries.par_iter().map(decode_qr).collect()`
-                    BEFORE the grouping loop -- grouping itself must stay
+                    group's files into
+                    `<Project>/<Location>/<Name>/<yyyy-mm-dd>/`
+                    (`group_dir`), where the date is parsed from the
+                    marker's `timestamp_utc`, not the photo's own EXIF
+                    capture time (`group_date`). If that plain date path
+                    is already taken (two shoots sharing Project/
+                    Location/Name on the same day -- a real case, not
+                    just hypothetical, see below), `finish_group` retries
+                    once at `<yyyy-mm-dd>-<ID>/` before giving up; a
+                    collision at *that* path too still means a genuine
+                    `bail!`. A metadata.yaml (the decoded LabelPayload,
+                    serde_yaml) goes in the leaf directory alongside the
+                    photos. Each group is buffered in `Group` and only
+                    moved (`finish_group`) once the *next* marker or
+                    end-of-directory is reached -- never move a file
+                    before you know the group is complete. With
+                    RUST_LOG=trace, dump_qr_debug_image() saves the exact
+                    image handed to the QR detector for every photo into
+                    a `_qr_debug/` folder next to it. Decoding all files
+                    (the expensive part) happens in one
+                    `entries.par_iter().map(decode_qr).collect()` BEFORE
+                    the grouping loop -- grouping itself must stay
                     strictly sequential (it depends on seeing markers in
                     time order), so it's cheap pure bookkeeping once
                     `decoded` already holds every file's result.
@@ -78,7 +93,10 @@ darktable-export/   not yet implemented. Will convert those split
 round-trips safely even if a field itself contains a dash, and the
 `"extra"` map is open-ended (field names come from whatever config file
 was used at capture time). Keep this split (JSON on the wire,
-dash-joined string only as a human-readable folder-name preview).
+dash-joined string only as a human-readable on-screen hint -- not a
+preview of photo-splitter's actual output path, which is a nested
+`<Project>/<Location>/<Name>/<yyyy-mm-dd>/` directory, not this flat
+string; see photo-splitter's entry above).
 `photo-splitter`'s `LabelPayload.extra` is a plain
 `BTreeMap<String, String>` deliberately -- it must treat keys as
 unknown/arbitrary, never assume a fixed schema -- and the field is
@@ -99,6 +117,17 @@ whenever it was last edited.
 - `cargo fmt --all`, `cargo clippy --all-targets --all-features -- -D
   warnings`, and `cargo test` must all pass before committing. CI
   enforces the same three.
+- The same-day ID-disambiguation path (`group_dir`'s
+  `disambiguate_with_id`) isn't just defensive coding -- it was added
+  after hitting the exact collision for real during the first proper
+  (non-dry-run) run against real camera files: two separate shoots both
+  decoded to Project/Location/Name "Test2", on the same day, and the
+  second one failed with `destination already exists` before this
+  existed. The failing marker photo was identified by copying candidate
+  files into an empty scratch dir one at a time and re-running
+  `--dry-run` on each until the duplicate's group name showed up --
+  simple and reliable when `RUST_LOG=trace`'s `_qr_debug/` dump doesn't
+  immediately make it obvious which specific file is the culprit.
 - `nix build .#label-qr-gui` / `.#photo-splitter` / `nix develop`
   should keep working; if you add a Cargo dependency, make sure
   `Cargo.lock` is committed so the Nix build stays reproducible. A new

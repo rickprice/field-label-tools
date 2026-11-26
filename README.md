@@ -19,13 +19,18 @@ afterward.
 2. **`photo-splitter`** — a CLI that walks a directory of time-ordered
    photos, treats each QR-code frame as the start of a new group, and
    moves everything up to the next QR frame into
-   `<Project>-<Location>-<ID>-<Name>/`, writing a `metadata.yaml` file
-   (the decoded QR payload verbatim) inside each folder. Photos are
-   ordered by EXIF `DateTimeOriginal` (falling back to file mtime), and
-   each group is only moved once its boundary is known — i.e. once the
-   next marker (or the end of the directory) is found — so an
-   interrupted run never leaves a group half-moved. Any files before
-   the first marker are left in place with a warning rather than
+   `<Project>/<Location>/<Name>/<yyyy-mm-dd>/`, writing a `metadata.yaml`
+   file (the decoded QR payload verbatim) inside each folder. The date
+   comes from the marker's embedded `timestamp_utc`, not the photo's own
+   EXIF capture time. If two shoots share Project/Location/Name *and*
+   land on the same day, the second one's ID is appended to the date
+   (`<yyyy-mm-dd>-<ID>/`) to disambiguate — ID stays invisible in the
+   common case, only showing up when it's actually needed. Photos
+   themselves are ordered by EXIF `DateTimeOriginal` (falling back to
+   file mtime), and each group is only moved once its boundary is known
+   — i.e. once the next marker (or the end of the directory) is found —
+   so an interrupted run never leaves a group half-moved. Any files
+   before the first marker are left in place with a warning rather than
    guessed at. ✅ implemented.
 
    RAW files (CR2/NEF/ARW/DNG/ORF/PEF, matching `darktable-import-xmp`'s
