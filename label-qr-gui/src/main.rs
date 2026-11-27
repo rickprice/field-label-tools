@@ -8,6 +8,7 @@ use eframe::egui;
 use qrcode::render::svg;
 use qrcode::{Color as QrColor, EcLevel, QrCode};
 use serde::Deserialize;
+use serde::de::{Deserializer, MapAccess, Visitor};
 use serde_json::{Map, Value, json};
 
 mod ltc;
@@ -28,9 +29,13 @@ const LTC_FPS_OPTIONS: [(&str, f64, bool); 5] = [
     about = "Fullscreen appliance: enter field-label metadata on the left, read it back as a large QR code on the right"
 )]
 struct Args {
-    /// TOML file defining named Metadata Sets of extra project-specific
+    /// JSON file defining named Metadata Sets of extra project-specific
     /// fields, selectable from a dropdown, in addition to the built-in
-    /// Client/Project/Location/ID/Name fields (see fields.example.toml)
+    /// Client/Project/Location/ID/Name fields -- the exact same file
+    /// format (and, if you point both tools at the same path, the exact
+    /// same file) web/index.html's fields.json sidecar uses: {"Set
+    /// Name": [{"name": ..., "reset_on_next": bool, "multiline": bool},
+    /// ...], ...} (see web/fields.example.json)
     #[arg(long, value_name = "FILE")]
     config: Option<PathBuf>,
 
@@ -67,22 +72,16 @@ fn export_web(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `[[set]]` is one named "Metadata Set" selectable from the GUI's
-/// dropdown, each with its own `[[set.field]]` list -- the TOML
-/// equivalent of web/index.html's `fields.json` (`{"SetName":
-/// [{name, reset_on_next}, ...], ...}`), just shaped the way TOML
-/// naturally expresses a named list of named lists rather than mimicking
-/// JSON's object-keyed-by-name structure.
-#[derive(Deserialize, Default)]
-struct FieldsConfig {
-    #[serde(default, rename = "set")]
-    sets: Vec<FieldSet>,
-}
-
-#[derive(Deserialize, Clone)]
+/// One named "Metadata Set" selectable from the GUI's dropdown. Loaded
+/// from a JSON file shaped `{"Set Name": [field, ...], ...}` -- the exact
+/// same shape (and, if pointed at the same path, the exact same file)
+/// web/index.html's `fields.json` sidecar uses. `name` comes from the
+/// JSON object's key, not a field inside the value, so there's no
+/// `Deserialize` derive on this struct -- see `FieldSetsFile` below,
+/// which builds these from a JSON object's entries directly.
+#[derive(Clone)]
 struct FieldSet {
     name: String,
-    #[serde(default)]
     field: Vec<ExtraFieldDef>,
 }
 
@@ -98,6 +97,50 @@ struct ExtraFieldDef {
     /// multi-line address, etc.).
     #[serde(default)]
     multiline: bool,
+}
+
+/// Deserializes a `{"Set Name": [field, ...], ...}` JSON object into
+/// `Vec<FieldSet>`, preserving the object's own key order (matching JS
+/// object property order, which is what web/index.html's dropdown
+/// construction relies on) -- a plain `BTreeMap`/`serde_json::Map` would
+/// silently re-sort the sets alphabetically instead, without
+/// `serde_json`'s `preserve_order` feature (not worth enabling just for
+/// this one call site when a short manual `Visitor` does the same thing
+/// with no new dependency, by collecting map entries in the order
+/// `MapAccess` yields them -- which is the JSON text's own order,
+/// regardless of what Rust container `Deserialize` builds them into).
+struct FieldSetsFile(Vec<FieldSet>);
+
+impl<'de> Deserialize<'de> for FieldSetsFile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct FieldSetsVisitor;
+
+        impl<'de> Visitor<'de> for FieldSetsVisitor {
+            type Value = Vec<FieldSet>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a JSON object mapping metadata-set names to field lists")
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut sets = Vec::new();
+                while let Some((name, field)) = map.next_entry::<String, Vec<ExtraFieldDef>>()? {
+                    sets.push(FieldSet { name, field });
+                }
+                Ok(sets)
+            }
+        }
+
+        deserializer
+            .deserialize_map(FieldSetsVisitor)
+            .map(FieldSetsFile)
+    }
 }
 
 /// A no-extra-fields "Plain" set is always available, even if the config
@@ -133,9 +176,9 @@ fn default_field_sets() -> Vec<FieldSet> {
 fn load_fields_config(path: &Path) -> anyhow::Result<Vec<FieldSet>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading fields config {}", path.display()))?;
-    let config: FieldsConfig = toml::from_str(&text)
+    let FieldSetsFile(sets) = serde_json::from_str(&text)
         .with_context(|| format!("parsing fields config {}", path.display()))?;
-    Ok(ensure_plain_field_set(config.sets))
+    Ok(ensure_plain_field_set(sets))
 }
 
 struct LabelApp {
@@ -700,21 +743,15 @@ mod tests {
     #[test]
     fn load_fields_config_parses_sets_with_multiline_fields() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("fields.toml");
+        let path = dir.path().join("fields.json");
         std::fs::write(
             &path,
-            r#"
-            [[set]]
-            name = "Church Photos"
-
-            [[set.field]]
-            name = "People"
-            multiline = true
-
-            [[set.field]]
-            name = "Notes"
-            reset_on_next = true
-            "#,
+            r#"{
+                "Church Photos": [
+                    { "name": "People", "multiline": true },
+                    { "name": "Notes", "reset_on_next": true }
+                ]
+            }"#,
         )
         .unwrap();
 
@@ -726,6 +763,48 @@ mod tests {
         assert!(!church.field[0].reset_on_next);
         assert_eq!(church.field[1].name, "Notes");
         assert!(church.field[1].reset_on_next);
+    }
+
+    #[test]
+    fn load_fields_config_preserves_the_json_files_own_key_order() {
+        // Deliberately not alphabetical -- a plain BTreeMap/serde_json::Map
+        // would silently re-sort these, which is exactly the bug
+        // FieldSetsFile's custom Visitor exists to avoid. Each set has a
+        // real field so none of them trivially count as a "Plain
+        // equivalent" (an empty set would, by design -- see
+        // ensure_plain_field_set -- which would make this test
+        // accidentally pass/fail for the wrong reason).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fields.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "Zebra Shoots": [{"name": "Handler"}],
+                "Apple Orchard": [{"name": "Variety"}],
+                "Mango Farm": [{"name": "Variety"}]
+            }"#,
+        )
+        .unwrap();
+
+        let sets = load_fields_config(&path).unwrap();
+        assert_eq!(
+            set_names(&sets),
+            vec!["Plain", "Zebra Shoots", "Apple Orchard", "Mango Farm"]
+        );
+    }
+
+    #[test]
+    fn load_fields_config_can_read_the_webpages_own_fields_json_sidecar() {
+        // The whole point: both front ends accept the exact same file.
+        let path = PathBuf::from(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/web/fields.example.json"
+        ));
+        let sets = load_fields_config(&path).unwrap();
+        assert_eq!(
+            set_names(&sets),
+            vec!["Plain", "Survey", "Inspection", "Church Photos"]
+        );
     }
 
     #[test]

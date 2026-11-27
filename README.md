@@ -19,10 +19,12 @@ afterward.
    appliance — handy for handing the same label to several cameras in
    turn. Extra, project-specific fields are grouped into named
    **Metadata Sets**, picked from a dropdown, configured with `--config
-   fields.toml` (see
-   [`fields.example.toml`](label-qr-gui/fields.example.toml), which
+   fields.json` — **the exact same JSON sidecar file format** (and, if
+   you point both tools at the same path, the exact same file) the web
+   page below uses; see
+   [`fields.example.json`](label-qr-gui/web/fields.example.json), which
    includes a "Church Photos" example with multiline People/Address/
-   Phone Numbers fields); their values are embedded in the QR's JSON
+   Phone Numbers fields. Their values are embedded in the QR's JSON
    payload alongside the built-in fields, under `"extra"`. A "Plain" set
    (no extra fields) is always available even if you don't define one
    yourself. ✅ implemented.
@@ -34,11 +36,11 @@ afterward.
    semantics, so `photo-splitter` can't tell which one produced a given
    QR code. Open it directly from a phone's local storage (`file://`,
    fully offline) or host it anywhere static (e.g. GitHub Pages) and "Add
-   to Home Screen." Extra fields work the same way as `--config
-   fields.toml`, but grouped into named **metadata sets** picked from a
-   "Metadata Set" dropdown (a project with more than one kind of shoot —
-   survey vs. inspection, say — can define one field set per kind instead
-   of a single fixed list) via a JSON sidecar file: copy
+   to Home Screen." Extra fields are grouped into named **metadata sets**
+   picked from a "Metadata Set" dropdown (a project with more than one
+   kind of shoot — survey vs. inspection, say — can define one field set
+   per kind instead of a single fixed list) via the same JSON sidecar
+   file format the native GUI's `--config` takes: copy
    [`fields.example.json`](label-qr-gui/web/fields.example.json) to
    `fields.json` next to `index.html` (only takes effect when the page is
    fetched over http(s) — some browsers block `fetch()` of local files
@@ -193,35 +195,33 @@ afterward.
 
 Client / Project / Location / ID / Name are built in and always present.
 Additional fields are grouped into named Metadata Sets (selectable from a
-dropdown) and configured per project with a TOML file:
+dropdown) and configured per project with a JSON file — **the same one
+file works for both the native GUI and the web page** (see
+[`fields.example.json`](label-qr-gui/web/fields.example.json)):
 
-```toml
-[[set]]
-name = "Survey"
-
-[[set.field]]
-name = "Surveyor"
-
-[[set.field]]
-name = "Notes"
-reset_on_next = true  # cleared on "Next", like Name; default is to persist, like Project/Location
-
-[[set]]
-name = "Church Photos"
-
-[[set.field]]
-name = "People"
-multiline = true  # a bigger text area instead of a single-line box
-
-[[set.field]]
-name = "Address"
-multiline = true
+```json
+{
+  "Survey": [
+    { "name": "Surveyor" },
+    { "name": "Notes", "reset_on_next": true }
+  ],
+  "Church Photos": [
+    { "name": "People", "multiline": true },
+    { "name": "Address", "multiline": true }
+  ]
+}
 ```
 
-Pass it to the GUI with `label-qr-gui --config fields.toml`. A "Plain"
+`reset_on_next` clears a field on "Next", like Name; default is to
+persist, like Project/Location. `multiline` gets a bigger text area
+instead of a single-line box.
+
+Pass it to the GUI with `label-qr-gui --config fields.json`. A "Plain"
 set (no extra fields) is always available even if you don't define one
-yourself. Each configured field's value ends up in the QR's JSON payload
-under `"extra"` (empty values are omitted), e.g.:
+yourself — and a project's Metadata Sets only need to be written once,
+in one file, for both front ends. Each configured field's value ends up
+in the QR's JSON payload under `"extra"` (empty values are omitted),
+e.g.:
 
 ```json
 {"client":"Acme Co","project":"P1","location":"North Ridge","id":3,"name":"overview","timestamp_utc":"2026-11-26T00:10:00Z","extra":{"Surveyor":"J. Price"}}

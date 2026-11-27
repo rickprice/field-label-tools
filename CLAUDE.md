@@ -14,27 +14,31 @@ label-qr-gui/      egui/eframe appliance (window title/heading "QR Field
                     ID/Name) plus `field_sets: Vec<FieldSet>` (named
                     Metadata Sets, each with its own `field:
                     Vec<ExtraFieldDef>`, loaded from an optional
-                    `--config` TOML file -- see fields.example.toml) and
+                    `--config` JSON file -- see fields.example.json) and
                     `selected_set_index`; `extra: Vec<(ExtraFieldDef,
                     String)>` is rebuilt from
                     `field_sets[selected_set_index]` whenever the
                     "Metadata Set" ComboBox selection changes (losing
                     whatever was typed for the previously-selected set,
                     same as web/index.html's buildExtraFieldInputs()).
-                    ensure_plain_field_set() guarantees a no-extra-fields
-                    "Plain" set always exists (checked case-insensitively
-                    against "Plain"/"Default", or any set that's already
-                    empty), the same guarantee web/index.html's
-                    ensurePlainFieldSet() makes -- TOML naturally
-                    expresses "named list of named lists" as nested
-                    `[[set]] name=... [[set.field]] name=...` array-of-
-                    tables rather than mimicking JSON's object-keyed-by-
-                    name shape, so the two config *formats* differ even
-                    though the underlying concept (named sets, guaranteed
-                    Plain fallback) is identical. A field's
-                    `multiline: bool` swaps `text_edit_singleline` for
+                    The JSON shape (`{"SetName": [{name, reset_on_next,
+                    multiline}, ...], ...}`) is the exact same sidecar
+                    format web/index.html's fetch()-based loader uses --
+                    point both tools at the same file and they read
+                    identically. Serde's default JSON map type doesn't
+                    preserve key order, so `FieldSetsFile`'s hand-written
+                    `Deserialize` (a `Visitor` implementing `visit_map`
+                    that collects into a `Vec` instead of a `Map`)
+                    preserves the file's own set ordering without
+                    pulling in `preserve_order`. ensure_plain_field_set()
+                    guarantees a no-extra-fields "Plain" set always
+                    exists (checked case-insensitively against
+                    "Plain"/"Default", or any set that's already empty),
+                    the same guarantee web/index.html's
+                    ensurePlainFieldSet() makes. A field's `multiline:
+                    bool` swaps `text_edit_singleline` for
                     `egui::TextEdit::multiline` -- see
-                    fields.example.toml's "Church Photos" set (People/
+                    fields.example.json's "Church Photos" set (People/
                     Address/Phone Numbers, all multiline) for the
                     motivating real-world example. `payload()`
                     serializes everything as JSON for the QR code
@@ -103,10 +107,11 @@ label-qr-gui/      egui/eframe appliance (window title/heading "QR Field
                     into named metadata sets (a project with more than one
                     kind of shoot can have one field list per kind rather
                     than a single fixed one) picked via the "Metadata Set"
-                    dropdown; customization works like --config
-                    fields.toml but via a JSON sidecar (fields.example.json
-                    -> fields.json, `{"SetName": [{name, reset_on_next},
-                    ...], ...}`, loaded with fetch() -- falls back to the
+                    dropdown; customization works via the same JSON
+                    sidecar label-qr-gui's --config takes
+                    (fields.example.json -> fields.json, `{"SetName":
+                    [{name, reset_on_next, multiline}, ...], ...}`),
+                    loaded with fetch() -- falls back to the
                     DEFAULT_FIELD_SETS object hardcoded near the bottom of
                     the file if that fetch fails, e.g. opened via file://
                     in a browser that blocks fetch() of local files) or by
